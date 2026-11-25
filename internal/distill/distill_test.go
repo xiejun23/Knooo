@@ -267,6 +267,13 @@ func TestParseTopics(t *testing.T) {
 	if topics, err := parseTopics(`{"topics":[]}`, refs); err != nil || topics == nil || len(topics) != 0 {
 		t.Fatalf("empty topics = %v, error = %v", topics, err)
 	}
+	mixed := strings.Replace(topicJSON, `["m1"]`, `["m1","ghost-99","m1"]`, 1)
+	if topics, err := parseTopics(mixed, refs); err != nil || len(topics) != 1 || !reflect.DeepEqual(topics[0].Evidence, []string{"m1"}) {
+		t.Fatalf("mixed evidence = %#v, err = %v", topics, err)
+	}
+	if _, err := parseTopics(strings.Replace(topicJSON, `["m1"]`, `["ghost-99"]`, 1), refs); err == nil {
+		t.Fatal("all-invalid evidence should still fail")
+	}
 }
 
 func TestLocal(t *testing.T) {

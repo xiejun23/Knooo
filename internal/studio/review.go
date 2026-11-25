@@ -161,18 +161,40 @@ func (a *app) reviewModel() (string, error) {
 	return id, err
 }
 
+func (a *app) reviewWindowDays() (int, error) {
+	var raw string
+	err := a.db.QueryRow(`SELECT content FROM settings WHERE name='review_window_days'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	days, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || days < 0 {
+		return 0, nil
+	}
+	return days, nil
+}
+
 func (a *app) getReviewModel(w http.ResponseWriter, _ *http.Request) {
 	id, err := a.reviewModel()
 	if err != nil {
 		http.Error(w, "无法读取自动工作回顾设置", http.StatusInternalServerError)
 		return
 	}
-	jsonReply(w, map[string]string{"connectionId": id})
+	days, err := a.reviewWindowDays()
+	if err != nil {
+		http.Error(w, "无法读取自动工作回顾设置", http.StatusInternalServerError)
+		return
+	}
+	jsonReply(w, map[string]any{"connectionId": id, "maxAgeDays": days})
 }
 
 func (a *app) setReviewModel(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ConnectionID *string `json:"connectionId"`
+		MaxAgeDays   *int    `json:"maxAgeDays"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -190,6 +212,20 @@ func (a *app) setReviewModel(w http.ResponseWriter, r *http.Request) {
 		}
 		if config.Model == "" {
 			http.Error(w, "请先为连接保存默认模型 ID", http.StatusBadRequest)
+			return
+		}
+	}
+	days, _ := a.reviewWindowDays()
+	if body.MaxAgeDays != nil {
+		switch *body.MaxAgeDays {
+		case 0, 7, 30, 90:
+			days = *body.MaxAgeDays
+		default:
+			http.Error(w, "自动提炼范围无效", http.StatusBadRequest)
+			return
+		}
+		if _, err := a.db.ExecContext(r.Context(), `INSERT INTO settings VALUES('review_window_days',?) ON CONFLICT(name) DO UPDATE SET content=excluded.content`, strconv.Itoa(days)); err != nil {
+			http.Error(w, "无法保存自动工作回顾设置", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -233,7 +269,41 @@ func (a *app) setReviewModel(w http.ResponseWriter, r *http.Request) {
 	if id != "" {
 		a.startReview()
 	}
-	jsonReply(w, map[string]string{"connectionId": id})
+	jsonReply(w, map[string]any{"connectionId": id, "maxAgeDays": days})
+}
+
+func (a *app) retryReview(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID string `json:"id"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if a.demo || strings.TrimSpace(body.ID) == "" {
+		http.Error(w, "无法重新提炼该会话", http.StatusBadRequest)
+		return
+	}
+	id, err := a.reviewModel()
+	if err != nil || id == "" {
+		http.Error(w, "请先在「本机设置」中选择自动工作回顾的默认算力提供商", http.StatusBadRequest)
+		return
+	}
+	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM reviews WHERE session=?`, body.ID); err != nil {
+		http.Error(w, "无法重置会话回顾状态", http.StatusInternalServerError)
+		return
+	}
+	a.clearReviewFailure(r.Context(), body.ID)
+	a.review.Lock()
+	delete(a.review.rejected, body.ID)
+	if a.review.manual == nil {
+		a.review.manual = make(map[string]bool)
+	}
+	a.review.manual[body.ID] = true
+	a.review.message = ""
+	a.review.Unlock()
+	a.startReview()
+	a.wakeReview(false)
+	jsonReply(w, map[string]bool{"ok": true})
 }
 
 func (a *app) startReview() {

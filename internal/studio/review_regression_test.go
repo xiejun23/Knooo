@@ -425,3 +425,87 @@ func TestAutomaticReviewBacksOffTransientFailureAndProcessesOtherSessions(t *tes
 		t.Fatalf("expected healthy session to finish review: %+v", cached[healthy.ID])
 	}
 }
+
+func TestAutomaticReviewLookbackWindowAndManualRetry(t *testing.T) {
+	now := time.Now().UTC()
+	oldTime := now.Add(-60 * 24 * time.Hour).Format(time.RFC3339)
+	recentTime := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	window := "kind=custom&from=" + now.Add(-90*24*time.Hour).Format(time.RFC3339) + "&to=" + now.Add(time.Hour).Format(time.RFC3339)
+
+	oldSession := sessions.Session{
+		ID: "old-session", Agent: "codex", Project: "示例项目", Title: "六十天前会话", Updated: oldTime,
+		Messages: []sessions.Message{
+			{ID: "o1", Role: "user", Text: "排查旧版本导入脚本字段缺失。", Timestamp: oldTime},
+			{ID: "o2", Role: "assistant", Text: "已补齐缺失映射字段并完成验证。", Timestamp: oldTime},
+		},
+	}
+	recentSession := sessions.Session{
+		ID: "recent-session", Agent: "codex", Project: "示例项目", Title: "两小时前会话", Updated: recentTime,
+		Messages: []sessions.Message{
+			{ID: "r1", Role: "user", Text: "优化工作回顾分页查询性能。", Timestamp: recentTime},
+			{ID: "r2", Role: "assistant", Text: "改为按当前范围筛选主键查询，耗时显著下降。", Timestamp: recentTime},
+		},
+	}
+	recentTopic := distill.Topic{
+		Title: "优化工作回顾查询", Problem: "避免每次加载反序列化全表历史",
+		Approach: "按当前会话范围分块查询", Outcome: "接口响应速度提升",
+		Status: "verified", Evidence: []string{"r1", "r2"},
+	}
+	oldTopic := distill.Topic{
+		Title: "补齐导入脚本字段", Problem: "排查旧版导入映射遗漏",
+		Approach: "核对字段列表并补齐映射", Outcome: "历史导入恢复正常",
+		Status: "resolved", Evidence: []string{"o1", "o2"},
+	}
+	gateway, calls := reviewTestGateway(t, []reviewTestBatch{
+		{ids: []string{"r1", "r2"}, topics: []distill.Topic{recentTopic}},
+		{ids: []string{"o1", "o2"}, topics: []distill.Topic{oldTopic}},
+	})
+	a, err := New(nil, t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	a.sessions = []sessions.Session{recentSession, oldSession}
+	a.revisions = reviewRevisions(a.sessions)
+	profile := configureReviewTest(t, a, gateway)
+	// Prevent POST handlers from launching an asynchronous worker loop during deterministic stepping.
+	a.review.wake = make(chan struct{}, 1)
+
+	// Enable a 30-day automatic lookback window.
+	reviewTestRequest(t, a, "POST", "/api/review-settings", `{"connectionId":"`+profile.ID+`","maxAgeDays":30}`)
+
+	a.processReviews(context.Background(), false)
+	if calls.Load() != 1 {
+		t.Fatalf("expected only recent session to be auto-reviewed within 30d window, got %d calls", calls.Load())
+	}
+	var res struct {
+		Entries []reviewEntry `json:"entries"`
+	}
+	body := reviewTestRequest(t, a, "GET", "/api/reviews?"+window, "")
+	if err := json.Unmarshal([]byte(body), &res); err != nil || len(res.Entries) != 2 {
+		t.Fatalf("unexpected /api/reviews response: %s (%v)", body, err)
+	}
+	states := map[string]string{}
+	for _, entry := range res.Entries {
+		states[entry.Session.ID] = entry.State
+	}
+	if states[recentSession.ID] != "ready" || states[oldSession.ID] != "skipped" {
+		t.Fatalf("expected recent=ready and old=skipped, got %+v", states)
+	}
+
+	// Manually retrying the skipped old session should bypass maxAgeDays and process just that session.
+	reviewTestRequest(t, a, "POST", "/api/reviews/retry", `{"id":"`+oldSession.ID+`"}`)
+	a.processReviews(context.Background(), false)
+	if calls.Load() != 2 {
+		t.Fatalf("expected manual retry to process old session, got %d calls", calls.Load())
+	}
+	body = reviewTestRequest(t, a, "GET", "/api/reviews?"+window, "")
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		t.Fatalf("failed decoding retry response: %v", err)
+	}
+	for _, entry := range res.Entries {
+		if entry.Session.ID == oldSession.ID && (entry.State != "ready" || len(entry.Topics) != 1 || entry.Topics[0].Title != oldTopic.Title) {
+			t.Fatalf("expected manually retried session to be ready with topic: %+v", entry)
+		}
+	}
+}

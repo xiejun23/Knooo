@@ -15,7 +15,7 @@ type Session = AgentSource & { id: string; project: string; projectPath: string;
 type Message = { id: string; role: string; text: string; timestamp: string; line: number };
 type ProjectSource = Location & {project:string;projectPath:string};
 type Topic = { title: string; problem: string; approach?:string; outcome: string; status: string; lesson: string; exercise: string; evidence: string[] };
-type ReviewEntry = { session:Session; state:'ready'|'queued'|'running'|'cooldown'|'error'|'disabled'; topics?:Topic[] };
+type ReviewEntry = { session:Session; state:'ready'|'queued'|'running'|'cooldown'|'skipped'|'error'|'disabled'; topics?:Topic[] };
 type Review = { connectionId:string; error?:string; settingsError?:boolean; entries:ReviewEntry[] };
 type Detail = { session: Session; topics: Topic[] | null; generated: boolean };
 type DistillPlan = { inputBudget:number; outputBudget:number; estimatedInput:number; included:number; total:number; shortened:boolean; confirmation:string };
@@ -82,6 +82,7 @@ function App() {
  const [reviewProjects,setReviewProjects] = useState<Map<string,Session>>(()=>new Map());
  const [collapsedReviewProjects,setCollapsedReviewProjects] = useState<Set<string>>(()=>new Set());
  const [review, setReview] = useState<Review>();
+ const [reviewTick, setReviewTick] = useState(0);
  const [project, setProject] = useState('');
  const [storedAgents, setAgents] = useState<string[]>([]);
  const [query, setQuery] = useState('');
@@ -159,6 +160,21 @@ function App() {
  const sessionMap = useMemo(() => new Map(listing.sessions.map(session => [session.id, session])), [listing]);
  const fail = (err:unknown) => setError(err instanceof Error ? err.message : String(err));
  function collapseReader() { setReaderCollapsed(true);readerToggle.current?.focus(); }
+ async function retryReviewSession(id: string) {
+  setError('');
+  setNotice('');
+  try {
+   await api('reviews/retry', { id });
+   setNotice('已加入提炼队列，稍后自动更新。');
+   setReviewTick(v => v + 1);
+  } catch (err) {
+   fail(err);
+  }
+ }
+ async function saveReviewNote(sessionId: string, topic: Topic) {
+  await api('notes', { sessionId, topic });
+  setNotice('已存入知识库。');
+ }
  function navigate(next:Page, fromReview=false) { setPage(next);setReviewLogs(fromReview);setError('');setNotice(''); }
  function open(id:string, anchor?:string, tab:ReaderFocus['tab']=anchor ? 'raw' : 'topic') { setFocus({id,anchor,tab});setReaderCollapsed(false); }
  function selectProfile(id:string) { setProfileId(id);setModel(connections.profiles.find(p=>p.id===id)?.model ?? ''); }
@@ -195,24 +211,34 @@ function App() {
   if (page !== 'review') return;
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
-  setReview(undefined);
   async function poll() {
+   let delay = 60000;
    try {
     const from = typeof reviewRange==='number' ? dayStart(1-reviewRange) : new Date(`${reviewRange.from}T00:00:00`);
     const to = typeof reviewRange==='number' ? dayStart() : new Date(`${reviewRange.to}T00:00:00`);
     to.setDate(to.getDate()+1);
     const args = agentQuery({from:from.toISOString(),to:to.toISOString()},selectedAgents);
     const next = await api<Review>(`reviews?${args}`,undefined,controller.signal);
-    if (!controller.signal.aborted) setReview(next);
+    if (!controller.signal.aborted) {
+     setReview(next);
+     const hasActive = next.entries.some(entry => entry.state === 'running' || entry.state === 'queued');
+     const hasCooldown = next.entries.some(entry => entry.state === 'cooldown');
+     delay = hasActive ? 4000 : hasCooldown ? 30000 : 60000;
+    }
    } catch (err) {
-    if (!controller.signal.aborted) fail(err);
+    if (!controller.signal.aborted) { fail(err); delay = 15000; }
    } finally {
-    if (!controller.signal.aborted) timer=setTimeout(poll,4000);
+    if (!controller.signal.aborted) {
+     timer = setTimeout(() => {
+      if (document.hidden && delay >= 30000) timer = setTimeout(poll, delay);
+      else void poll();
+     }, delay);
+    }
    }
   }
   void poll();
   return ()=>{controller.abort();clearTimeout(timer);};
- },[page,reviewRange,selectedAgents,listing]);
+ },[page,reviewRange,selectedAgents,listing,reviewTick]);
  useEffect(() => {
   loadConnections().catch(fail).finally(()=>setLoadingConnections(false));
   api<About>('about').then(value=>{setAbout(value);if (!value.demo) void checkUpdate();}).catch(err=>{setAbout(null);fail(err);});
@@ -297,7 +323,8 @@ function App() {
      <div className="review-controls"><ReviewDates range={reviewRange} onChange={setReviewRange}/><AgentPicker counts={activeAgents} selected={selectedAgents} onChange={setAgents}/></div>
      {review ? <WorkReview review={review} selected={reviewProjects} onSelect={setReviewProjects}
       collapsed={collapsedReviewProjects} onCollapse={setCollapsedReviewProjects}
-      demo={about?.demo===true} onSettings={()=>navigate('settings')} onLogs={()=>navigate('logs',true)} open={open}/> : !error && <EagleLoading label="正在读取工作回顾"/>}
+      demo={about?.demo===true} onSettings={()=>navigate('settings')} onLogs={()=>navigate('logs',true)}
+      onRetry={retryReviewSession} onSaveNote={saveReviewNote} open={open}/> : !error && <EagleLoading label="正在读取工作回顾"/>}
     </>}
     {page==='sessions' && <>
      <Heading title="会话" description={about?.demo ? '示例会话 · 按项目浏览 Agent 历史。' : '自动发现本机 Agent 的会话记录。'} action={refreshAction}/>
@@ -349,36 +376,84 @@ function isSecondaryTopic(topic:Topic) {
  return gitMicroStepPattern.test(title) || gitMicroStepDetailPattern.test(title);
 }
 
-function ReviewTopicCard({topic,sessionTitle,sessionId,open}:{
- topic:Topic; sessionTitle:string; sessionId:string; open:(id:string,anchor?:string,tab?:ReaderFocus['tab'])=>void;
+type ReviewStatusFilter = 'all' | 'done' | 'open' | 'observed';
+
+function matchesStatusFilter(topic:Topic, filter:ReviewStatusFilter) {
+ if (filter === 'all') return true;
+ if (filter === 'done') return topic.status === 'verified' || topic.status === 'resolved';
+ if (filter === 'open') return topic.status === 'open';
+ return topic.status === 'observed';
+}
+
+function matchesReviewQuery(topic:Topic, session:Session, query:string) {
+ if (!query) return true;
+ const q = query.toLowerCase();
+ return topic.title.toLowerCase().includes(q) ||
+  topic.problem.toLowerCase().includes(q) ||
+  (topic.approach?.toLowerCase().includes(q) ?? false) ||
+  topic.outcome.toLowerCase().includes(q) ||
+  session.title.toLowerCase().includes(q) ||
+  session.project.toLowerCase().includes(q);
+}
+
+function ReviewTopicCard({topic,sessionTitle,sessionId,demo,onSaveNote,open}:{
+ topic:Topic; sessionTitle:string; sessionId:string; demo:boolean;
+ onSaveNote:(sessionId:string,topic:Topic)=>Promise<void>;
+ open:(id:string,anchor?:string,tab?:ReaderFocus['tab'])=>void;
 }) {
  const [allEvidence,setAllEvidence] = useState(false);
+ const [savingNote,setSavingNote] = useState(false);
+ const [savedNote,setSavedNote] = useState(false);
  const heading = topic.title && topic.title!==sessionTitle ? topic.title : topic.problem;
  const visibleEvidence = allEvidence ? topic.evidence : topic.evidence.slice(0,4);
  const hiddenEvidence = topic.evidence.length - visibleEvidence.length;
+ async function handleSave() {
+  if (savingNote || savedNote) return;
+  setSavingNote(true);
+  try {
+   await onSaveNote(sessionId, topic);
+   setSavedNote(true);
+  } finally {
+   setSavingNote(false);
+  }
+ }
  return <li>
   <div className="review-question-title"><h5>{heading}</h5>{topicStatus[topic.status] && <span className="status-label" data-status={topic.status}>{topicStatus[topic.status]}</span>}</div>
   {topic.problem!==heading && <p>{topic.problem}</p>}
   <dl>{topic.approach && <div><dt>做法</dt><dd>{topic.approach}</dd></div>}
    <div><dt>结果</dt><dd>{topic.outcome || '会话中没有确认结果'}</dd></div>
   </dl>
-  <div className="topic-evidence">
-   {visibleEvidence.map((id,index)=><button key={id} className="button text-button" onClick={()=>open(sessionId,id)}>依据 {index+1} <ArrowUpRight size={13}/></button>)}
-   {hiddenEvidence>0 && <button type="button" className="button text-button review-more-evidence" onClick={()=>setAllEvidence(true)}>+{hiddenEvidence} 条依据</button>}
-   {allEvidence && topic.evidence.length>4 && <button type="button" className="button text-button review-more-evidence" onClick={()=>setAllEvidence(false)}>收起依据</button>}
+  <div className="review-topic-foot">
+   <div className="topic-evidence">
+    {visibleEvidence.map((id,index)=><button key={id} className="button text-button" onClick={()=>open(sessionId,id)}>依据 {index+1} <ArrowUpRight size={13}/></button>)}
+    {hiddenEvidence>0 && <button type="button" className="button text-button review-more-evidence" onClick={()=>setAllEvidence(true)}>+{hiddenEvidence} 条依据</button>}
+    {allEvidence && topic.evidence.length>4 && <button type="button" className="button text-button review-more-evidence" onClick={()=>setAllEvidence(false)}>收起依据</button>}
+   </div>
+   {!demo && <button type="button" className={`button text-button review-save-note ${savedNote ? 'is-saved' : ''}`} disabled={savingNote || savedNote} onClick={()=>void handleSave()}>
+    {savedNote ? <><Check size={13}/>已存知识库</> : <><BookOpen size={13}/>{savingNote ? '保存中…' : '存入知识库'}</>}
+   </button>}
   </div>
  </li>;
 }
 
-function ReviewSessionBlock({entry,focusedMode,open}:{
- entry:ReviewEntry; focusedMode:boolean; open:(id:string,anchor?:string,tab?:ReaderFocus['tab'])=>void;
+function ReviewSessionBlock({entry,focusedMode,statusFilter,searchTerm,demo,canRetry,onRetry,onSaveNote,open}:{
+ entry:ReviewEntry; focusedMode:boolean; statusFilter:ReviewStatusFilter; searchTerm:string;
+ demo:boolean; canRetry:boolean;
+ onRetry:(id:string)=>Promise<void>;
+ onSaveNote:(sessionId:string,topic:Topic)=>Promise<void>;
+ open:(id:string,anchor?:string,tab?:ReaderFocus['tab'])=>void;
 }) {
  const [showAllPrimary,setShowAllPrimary] = useState(false);
  const [showSecondary,setShowSecondary] = useState(false);
+ const [retrying,setRetrying] = useState(false);
  const {session,topics=[]} = entry;
+ const filtered = topics.filter(topic => matchesStatusFilter(topic, statusFilter) && matchesReviewQuery(topic, session, searchTerm));
+ if (filtered.length === 0) return null;
+
+ const effectiveFocused = focusedMode && statusFilter === 'all' && !searchTerm;
  const primary:Topic[] = [];
  const secondary:Topic[] = [];
- for (const topic of topics) {
+ for (const topic of filtered) {
   if (isSecondaryTopic(topic)) secondary.push(topic);
   else primary.push(topic);
  }
@@ -387,8 +462,8 @@ function ReviewSessionBlock({entry,focusedMode,open}:{
  let shown:Topic[];
  let hiddenPrimary = 0;
  let foldedSecondary:Topic[] = [];
- if (!focusedMode) {
-  shown = topics;
+ if (!effectiveFocused) {
+  shown = filtered;
  } else if (primary.length > 0) {
   shown = showAllPrimary ? primary : primary.slice(0, primaryLimit);
   hiddenPrimary = primary.length - shown.length;
@@ -401,61 +476,122 @@ function ReviewSessionBlock({entry,focusedMode,open}:{
   ? [`${primary.length} 项重点`, secondary.length > 0 ? `${secondary.length} 条观察/微步骤` : ''].filter(Boolean)
   : [`${secondary.length} 条观察`];
 
+ async function handleRetry() {
+  setRetrying(true);
+  try { await onRetry(session.id); }
+  finally { setRetrying(false); }
+ }
+
  return <article className="review-session">
   <div className="review-session-heading">
    <div className="review-session-meta">
-    <div className="review-session-badges"><AgentBadge source={session}/><span className="review-session-count">{summaryParts.join(' · ')}</span></div>
+    <div className="review-session-badges">
+     <AgentBadge source={session}/>
+     <span className="review-session-count">{summaryParts.join(' · ')}</span>
+     {session.updated && <span className="review-session-time">{historyTime(session.updated)}</span>}
+    </div>
     <h4>{session.title}</h4>
    </div>
-   <button className="button secondary" onClick={()=>open(session.id,undefined,'raw')}>查看会话 <ArrowUpRight size={14}/></button>
+   <div className="review-session-actions">
+    {canRetry && <button type="button" className="button text-button review-retry-btn" disabled={retrying || entry.state==='running'} onClick={()=>void handleRetry()}>
+     <RefreshCw size={13}/>{retrying || entry.state==='running' ? '提炼中…' : '重新提炼'}
+    </button>}
+    <button className="button secondary" onClick={()=>open(session.id,undefined,'raw')}>查看会话 <ArrowUpRight size={14}/></button>
+   </div>
   </div>
-  <ul className="review-questions">{shown.map((topic,index)=><ReviewTopicCard key={`${topic.title}-${index}`} topic={topic} sessionTitle={session.title} sessionId={session.id} open={open}/>)}</ul>
-  {focusedMode && hiddenPrimary > 0 && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowAllPrimary(true)}>
+  <ul className="review-questions">{shown.map((topic,index)=><ReviewTopicCard key={`${topic.title}-${index}`} topic={topic} sessionTitle={session.title} sessionId={session.id} demo={demo} onSaveNote={onSaveNote} open={open}/>)}</ul>
+  {effectiveFocused && hiddenPrimary > 0 && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowAllPrimary(true)}>
    <ChevronDown size={14}/>展开其余 {hiddenPrimary} 项重点工作
   </button>}
-  {focusedMode && primary.length > primaryLimit && showAllPrimary && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowAllPrimary(false)}>
+  {effectiveFocused && primary.length > primaryLimit && showAllPrimary && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowAllPrimary(false)}>
    <ChevronRight size={14}/>收起多余重点工作
   </button>}
-  {focusedMode && primary.length > 0 && foldedSecondary.length > 0 && <div className="review-secondary-drawer">
+  {effectiveFocused && primary.length > 0 && foldedSecondary.length > 0 && <div className="review-secondary-drawer">
    <button type="button" className="review-secondary-toggle" aria-expanded={showSecondary} onClick={()=>setShowSecondary(v=>!v)}>
     {showSecondary ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}
     <span>{showSecondary ? '收起背景观察与微步骤' : `另有 ${foldedSecondary.length} 条背景观察与微步骤`}</span>
    </button>
-   {showSecondary && <ul className="review-questions is-secondary">{foldedSecondary.map((topic,index)=><ReviewTopicCard key={`sec-${topic.title}-${index}`} topic={topic} sessionTitle={session.title} sessionId={session.id} open={open}/>)}</ul>}
+   {showSecondary && <ul className="review-questions is-secondary">{foldedSecondary.map((topic,index)=><ReviewTopicCard key={`sec-${topic.title}-${index}`} topic={topic} sessionTitle={session.title} sessionId={session.id} demo={demo} onSaveNote={onSaveNote} open={open}/>)}</ul>}
   </div>}
-  {focusedMode && primary.length === 0 && secondary.length > fallbackLimit && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowSecondary(v=>!v)}>
+  {effectiveFocused && primary.length === 0 && secondary.length > fallbackLimit && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowSecondary(v=>!v)}>
    {showSecondary ? <><ChevronRight size={14}/>收起其余观察</> : <><ChevronDown size={14}/>展开其余 {secondary.length - fallbackLimit} 条观察</>}
   </button>}
  </article>;
 }
 
-function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettings,onLogs,open}: {
+function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettings,onLogs,onRetry,onSaveNote,open}: {
  review:Review; selected:Map<string,Session>; onSelect:(next:Map<string,Session>)=>void;
  collapsed:Set<string>; onCollapse:(next:Set<string>)=>void;
- demo:boolean; onSettings:()=>void; onLogs:()=>void; open:(id:string,anchor?:string,tab?:ReaderFocus['tab'])=>void;
+ demo:boolean; onSettings:()=>void; onLogs:()=>void;
+ onRetry:(id:string)=>Promise<void>;
+ onSaveNote:(sessionId:string,topic:Topic)=>Promise<void>;
+ open:(id:string,anchor?:string,tab?:ReaderFocus['tab'])=>void;
 }) {
  const [viewMode,setViewMode] = useState<'focused'|'all'>('focused');
+ const [statusFilter,setStatusFilter] = useState<ReviewStatusFilter>('all');
+ const [searchQuery,setSearchQuery] = useState('');
+ const [showUnreviewed,setShowUnreviewed] = useState(false);
+
  const options = new Map(selected);
  for (const {session} of review.entries) options.set(projectKey(session),session);
  const visible = selected.size ? review.entries.filter(({session})=>selected.has(projectKey(session))) : review.entries;
  const ready = visible.filter(entry=>entry.state==='ready').length;
  const pending = visible.filter(entry=>entry.state==='queued'||entry.state==='running').length;
  const cooling = visible.filter(entry=>entry.state==='cooldown').length;
+ const skippedOrFailed = visible.filter(entry=>(entry.state==='skipped'||entry.state==='error') && !entry.topics?.length);
  const running = visible.some(entry=>entry.state==='running');
+
+ let doneCount = 0;
+ let openCount = 0;
+ let observedCount = 0;
+ const projectKeysWithTopics = new Set<string>();
+ const searchTerm = searchQuery.trim();
  const groups = new Map<string,ReviewEntry[]>();
  for (const entry of visible) {
   if (!entry.topics?.length) continue;
-  const key = projectKey(entry.session);
-  const group = groups.get(key);
+  const pKey = projectKey(entry.session);
+  projectKeysWithTopics.add(pKey);
+  for (const topic of entry.topics) {
+   if (topic.status === 'verified' || topic.status === 'resolved') doneCount++;
+   else if (topic.status === 'open') openCount++;
+   else if (topic.status === 'observed') observedCount++;
+  }
+  const hasMatch = entry.topics.some(topic => matchesStatusFilter(topic, statusFilter) && matchesReviewQuery(topic, entry.session, searchTerm));
+  if (!hasMatch) continue;
+  const group = groups.get(pKey);
   if (group) group.push(entry);
-  else groups.set(key,[entry]);
+  else groups.set(pKey,[entry]);
  }
+ const totalTopics = doneCount + openCount + observedCount;
+ const canRetry = !demo && !!review.connectionId;
+ const hasActiveFilter = statusFilter !== 'all' || !!searchTerm;
+
  return <>
   {!demo && !review.connectionId && <div className="feedback"><span>选择默认模型后，Knooo 会自动提炼已导入会话。</span><button className="button secondary" onClick={onSettings}>设置默认模型 <ArrowRight size={15}/></button></div>}
   {review.error && <div className="feedback error" role="alert"><span>{review.error}</span><div className="filters">
    <button className="button secondary" onClick={onLogs}>查看回顾日志</button>
    {review.settingsError && <button className="button secondary" onClick={onSettings}>检查模型设置</button>}
   </div></div>}
+
+  {totalTopics > 0 && <div className="review-summary-strip" role="group" aria-label="回顾统计与快速状态筛选">
+   <button type="button" className="review-metric" aria-pressed={statusFilter==='all'} onClick={()=>setStatusFilter('all')}>
+    <span>活跃项目 / 总条目</span>
+    <strong>{projectKeysWithTopics.size} <small>项目 · {totalTopics} 项</small></strong>
+   </button>
+   <button type="button" className="review-metric" aria-pressed={statusFilter==='done'} onClick={()=>setStatusFilter(current=>current==='done' ? 'all' : 'done')}>
+    <span>已完成（验证 / 解决）</span>
+    <strong>{doneCount}</strong>
+   </button>
+   <button type="button" className="review-metric is-open" aria-pressed={statusFilter==='open'} onClick={()=>setStatusFilter(current=>current==='open' ? 'all' : 'open')}>
+    <span>待处理</span>
+    <strong>{openCount}</strong>
+   </button>
+   <button type="button" className="review-metric" aria-pressed={statusFilter==='observed'} onClick={()=>setStatusFilter(current=>current==='observed' ? 'all' : 'observed')}>
+    <span>已观察</span>
+    <strong>{observedCount}</strong>
+   </button>
+  </div>}
+
   <div className="section-line review-section">
    <div className="review-heading"><h2>项目回顾</h2>
     <ReviewDropdown label={selected.size ? `筛选项目，已选 ${selected.size} 个` : '筛选项目'} className="review-project-picker"
@@ -476,12 +612,20 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
      <button type="button" aria-pressed={viewMode==='focused'} onClick={()=>setViewMode('focused')}>聚焦重点</button>
      <button type="button" aria-pressed={viewMode==='all'} onClick={()=>setViewMode('all')}>全部条目</button>
     </div>
+    {totalTopics > 0 && <div className="review-inline-search">
+     <Search size={14} aria-hidden="true"/>
+     <input value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} placeholder="筛选当前回顾…" aria-label="筛选当前工作回顾"/>
+     {searchQuery && <button type="button" className="provider-clear-btn" aria-label="清空回顾筛选" onClick={()=>setSearchQuery('')}><X size={12}/></button>}
+    </div>}
+    {hasActiveFilter && <button type="button" className="button text-button" onClick={()=>{setStatusFilter('all');setSearchQuery('');}}>重置筛选</button>}
    </div>
    {visible.length>0 && <span role="status">已提炼 {ready} / {visible.length} 条会话{pending>0 ? ` · ${pending} 条处理中或排队` : ''}{cooling>0 ? ` · ${cooling} 条活跃会话静默后整理` : ''}</span>}
   </div>
+
   {(running || pending>0 && !review.error) && <div className="review-flight"><EagleLoading label={running ? '正在提炼会话' : '等待提炼会话'}/></div>}
   {visible.length===0 && <Empty icon={<Folder size={25}/>} title="这个范围没有会话"><p>可以切换时间范围或调整项目和 Agent 筛选。</p></Empty>}
-  {groups.size===0 && ready>0 && pending===0 && <Empty icon={<ListChecks size={25}/>} title="没有可回顾的工作问题"><p>这个范围内已处理的会话没有可单独回顾的工作问题。</p></Empty>}
+  {groups.size===0 && totalTopics>0 && hasActiveFilter && <Empty icon={<Search size={25}/>} title="当前筛选条件下没有匹配条目"><p>试试切换状态筛选或清空关键词。</p><button type="button" className="button secondary" onClick={()=>{setStatusFilter('all');setSearchQuery('');}}>查看全部条目</button></Empty>}
+  {groups.size===0 && totalTopics===0 && ready>0 && pending===0 && <Empty icon={<ListChecks size={25}/>} title="没有可回顾的工作问题"><p>这个范围内已处理的会话没有可单独回顾的工作问题。</p></Empty>}
   <div className="projects">{[...groups.entries()].map(([key,entries])=>{
    const project = entries[0].session;
    const expanded = !collapsed.has(key);
@@ -492,9 +636,24 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
      else next.delete(key);
      onCollapse(next);
     }}>{expanded ? <ChevronDown size={16}/> : <ChevronRight size={16}/>}<ProjectIcon/><span className="review-project-name"><strong>{project.project}</strong><small title={project.projectPath}>{projectOrigin(project)}</small></span><span className="project-count">{entries.length} 条会话</span></button></h3>
-    {expanded && entries.map(entry=><ReviewSessionBlock key={entry.session.id} entry={entry} focusedMode={viewMode==='focused'} open={open}/>)}
+    {expanded && entries.map(entry=><ReviewSessionBlock key={entry.session.id} entry={entry} focusedMode={viewMode==='focused'} statusFilter={statusFilter} searchTerm={searchTerm} demo={demo} canRetry={canRetry} onRetry={onRetry} onSaveNote={onSaveNote} open={open}/>)}
    </section>;
   })}</div>
+
+  {skippedOrFailed.length > 0 && canRetry && <div className="review-unreviewed-box">
+   <button type="button" className="review-secondary-toggle" aria-expanded={showUnreviewed} onClick={()=>setShowUnreviewed(v=>!v)}>
+    {showUnreviewed ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}
+    <span>另有 {skippedOrFailed.length} 条未提炼会话（超出自动范围或上次失败），可按需单独提炼</span>
+   </button>
+   {showUnreviewed && <ul className="review-unreviewed-list">{skippedOrFailed.map(({session,state})=><li key={session.id}>
+    <AgentBadge source={session}/>
+    <div className="review-unreviewed-copy">
+     <strong>{session.title}</strong>
+     <small>{session.project} · {historyTime(session.updated)} · {state === 'skipped' ? '超出自动范围' : '上次提炼失败'}</small>
+    </div>
+    <button type="button" className="button secondary" onClick={()=>void onRetry(session.id)}><RefreshCw size={13}/>立即提炼</button>
+   </li>)}</ul>}
+  </div>}
  </>;
 }
 

@@ -134,3 +134,49 @@ func TestReadOnlyScanOfTimestampLessSource(t *testing.T) {
 		t.Fatal("scan modified the source file")
 	}
 }
+
+func TestDiskCachePersistsAcrossRestartsAndInvalidates(t *testing.T) {
+	store, home := isolatedStore(t)
+	cacheFile := filepath.Join(t.TempDir(), "sessions-cache.v1.zst")
+	store.SetCachePath(cacheFile)
+
+	path := filepath.Join(home, ".codex", "sessions", "rollout-disk.jsonl")
+	header := `{"type":"session_meta","payload":{"id":"disk-cache","timestamp":"2026-01-01T10:00:00Z"}}` + "\n"
+	first := `{"type":"event_msg","timestamp":"2026-01-01T10:00:01Z","payload":{"type":"user_message","message":"First cached turn."}}` + "\n"
+	second := `{"type":"event_msg","timestamp":"2026-01-01T10:00:02Z","payload":{"type":"agent_message","message":"Second updated turn."}}` + "\n"
+	putFile(t, path, []byte(header+first))
+
+	initial := scanClean(t, store, nil)
+	if len(initial) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(initial))
+	}
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("expected disk cache file to be written: %v", err)
+	}
+
+	// Cold restart into a fresh Store should reuse the persisted disk cache.
+	cold := New(home)
+	cold.SetCachePath(cacheFile)
+	reloaded := scanClean(t, cold, nil)
+	if !reflect.DeepEqual(initial, reloaded) {
+		t.Fatalf("cold disk-cache reload mismatch:\ngot:  %#v\nwant: %#v", reloaded, initial)
+	}
+	if len(cold.disk) != 1 {
+		t.Fatalf("expected 1 entry in cold disk cache, got %d", len(cold.disk))
+	}
+
+	// Appending to the source file must invalidate the cached entry and update the disk cache.
+	appendFile(t, path, second)
+	updated := scanClean(t, cold, nil)
+	if len(updated) != 1 {
+		t.Fatalf("expected 1 updated session, got %d", len(updated))
+	}
+	requireMessages(t, updated[0], []int{2, 3}, "First cached turn.", "Second updated turn.")
+
+	coldAfterUpdate := New(home)
+	coldAfterUpdate.SetCachePath(cacheFile)
+	reloadedUpdated := scanClean(t, coldAfterUpdate, nil)
+	if !reflect.DeepEqual(updated, reloadedUpdated) {
+		t.Fatalf("second cold reload did not reflect updated disk cache")
+	}
+}

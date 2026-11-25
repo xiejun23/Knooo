@@ -76,15 +76,17 @@ export function SettingsWorkspace({ connections, api, onChange, demo }: {
  connections: Connections; api: API; onChange: () => Promise<void>; demo: boolean;
 }) {
  const [reviewConnectionId, setReviewConnectionId] = useState<string | undefined>(demo ? '' : undefined);
+ const [reviewMaxAgeDays, setReviewMaxAgeDays] = useState<number>(0);
  const [reviewLoadError, setReviewLoadError] = useState('');
  const [editing, setEditing] = useState(false);
 
  useEffect(() => {
   if (demo) return;
   const controller = new AbortController();
-  api<{ connectionId: string }>('review-settings', undefined, controller.signal).then(({ connectionId }) => {
+  api<{ connectionId: string; maxAgeDays?: number }>('review-settings', undefined, controller.signal).then(({ connectionId, maxAgeDays }) => {
    if (!controller.signal.aborted) {
     setReviewConnectionId(connectionId);
+    setReviewMaxAgeDays(maxAgeDays ?? 0);
     setReviewLoadError('');
    }
   }).catch(err => {
@@ -107,17 +109,26 @@ export function SettingsWorkspace({ connections, api, onChange, demo }: {
    api={api}
    demo={demo}
    savedConnectionId={reviewConnectionId}
+   savedMaxAgeDays={reviewMaxAgeDays}
    loadError={reviewLoadError}
-   onSavedChange={setReviewConnectionId}
+   onSavedChange={(id, days) => { setReviewConnectionId(id); setReviewMaxAgeDays(days); }}
   />}
  </div>;
 }
+
+const reviewScopeOptions = [
+ { days: 7, label: '最近 7 天' },
+ { days: 30, label: '最近 30 天（推荐）' },
+ { days: 90, label: '最近 90 天' },
+ { days: 0, label: '全部历史' },
+] as const;
 
 export function AutomaticReviewSettings({
  profiles,
  api,
  demo,
  savedConnectionId,
+ savedMaxAgeDays,
  loadError,
  onSavedChange,
 }: {
@@ -125,25 +136,32 @@ export function AutomaticReviewSettings({
  api: API;
  demo: boolean;
  savedConnectionId?: string;
+ savedMaxAgeDays?: number;
  loadError?: string;
- onSavedChange?: (id: string) => void;
+ onSavedChange?: (id: string, maxAgeDays: number) => void;
 }) {
  const [internalSaved, setInternalSaved] = useState<string>();
+ const [internalDays, setInternalDays] = useState<number>(0);
  const [selected, setSelected] = useState('');
+ const [maxAgeDays, setMaxAgeDays] = useState<number>(30);
  const [busy, setBusy] = useState(false);
  const [error, setError] = useState('');
  const [status, setStatus] = useState('');
 
  const controlled = savedConnectionId !== undefined || onSavedChange !== undefined;
  const saved = controlled ? savedConnectionId : internalSaved;
+ const savedDays = controlled ? (savedMaxAgeDays ?? 0) : internalDays;
 
  useEffect(() => {
   if (demo || controlled) return;
   const controller = new AbortController();
-  api<{ connectionId: string }>('review-settings', undefined, controller.signal).then(({ connectionId }) => {
+  api<{ connectionId: string; maxAgeDays?: number }>('review-settings', undefined, controller.signal).then(({ connectionId, maxAgeDays: days }) => {
    if (!controller.signal.aborted) {
     setInternalSaved(connectionId);
     setSelected(connectionId);
+    const resolvedDays = days ?? (connectionId ? 0 : 30);
+    setInternalDays(days ?? 0);
+    setMaxAgeDays(resolvedDays);
    }
   }).catch(err => {
    if (!controller.signal.aborted) setError(err instanceof Error ? err.message : String(err));
@@ -154,8 +172,9 @@ export function AutomaticReviewSettings({
  useEffect(() => {
   if (controlled && savedConnectionId !== undefined) {
    setSelected(savedConnectionId);
+   setMaxAgeDays(savedConnectionId ? (savedMaxAgeDays ?? 0) : ((savedMaxAgeDays ?? 0) || 30));
   }
- }, [controlled, savedConnectionId]);
+ }, [controlled, savedConnectionId, savedMaxAgeDays]);
 
  if (demo) return null;
 
@@ -163,6 +182,7 @@ export function AutomaticReviewSettings({
  const chosen = profiles.find(profile => profile.id === selected);
  const savedProfile = profiles.find(profile => profile.id === saved);
  const activeRunning = !!saved && !!savedProfile && !savedProfile.disabled && savedProfile.ready && !!savedProfile.model;
+ const dirty = selected !== saved || (!!selected && maxAgeDays !== savedDays);
 
  async function save(event: FormEvent) {
   event.preventDefault();
@@ -170,10 +190,10 @@ export function AutomaticReviewSettings({
   setError('');
   setStatus('');
   try {
-   await api('review-settings', { connectionId: selected });
-   if (onSavedChange) onSavedChange(selected);
-   else setInternalSaved(selected);
-   setStatus(selected ? '自动工作回顾已更新。' : '自动工作回顾已关闭。');
+   await api('review-settings', { connectionId: selected, maxAgeDays });
+   if (onSavedChange) onSavedChange(selected, maxAgeDays);
+   else { setInternalSaved(selected); setInternalDays(maxAgeDays); }
+   setStatus(selected ? '自动工作回顾设置已保存。' : '自动工作回顾已关闭。');
   } catch (err) {
    setError(err instanceof Error ? err.message : String(err));
   } finally {
@@ -194,7 +214,7 @@ export function AutomaticReviewSettings({
   <div className="auto-review-head">
    <div>
     <h2>自动工作回顾</h2>
-    <p>启用后，Knooo 会按所选算力提供商在后台提炼近期会话，用于工作回顾与工作报告。</p>
+    <p>启用后，Knooo 会在会话静默 5 分钟后自动做增量提炼；已沉淀记录永久复用，可限定自动提炼范围控制 Token 开销。</p>
    </div>
    <span className="provider-status" data-status={activeRunning ? 'ready' : 'disabled'}>
     <span className="provider-status-dot" aria-hidden="true"/>
@@ -213,8 +233,14 @@ export function AutomaticReviewSettings({
      </option>)}
     </select>
    </label>
-   <button type="submit" className="button primary" disabled={busy || saved === undefined || selected === saved || !!selected && (!chosen || chosen.disabled || !chosen.ready || !chosen.model)}>
-    {busy ? <EagleMark flying/> : <Save size={15}/>} {selected ? (saved ? '保存默认算力' : '启用自动回顾') : '关闭自动回顾'}
+   {selected && <label className="auto-review-scope">
+    <span className="visually-hidden">自动提炼范围</span>
+    <select value={maxAgeDays} disabled={busy || saved === undefined} aria-label="自动提炼范围" onChange={event => { setMaxAgeDays(Number(event.target.value)); setStatus(''); }}>
+     {reviewScopeOptions.map(option => <option key={option.days} value={option.days}>范围：{option.label}</option>)}
+    </select>
+   </label>}
+   <button type="submit" className="button primary" disabled={busy || saved === undefined || !dirty || !!selected && (!chosen || chosen.disabled || !chosen.ready || !chosen.model)}>
+    {busy ? <EagleMark flying/> : <Save size={15}/>} {selected ? (saved ? '保存回顾设置' : '启用自动回顾') : '关闭自动回顾'}
    </button>
   </div>
   {unavailableHint && <p className="provider-hint">{unavailableHint}</p>}
