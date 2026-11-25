@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"pi-fixture","timestamp":"2026-01-01T10:00:00Z","cwd":"__FIXTURE_CWD__"}
+{"type":"message","id":"root","parentId":null,"timestamp":"2026-01-01T10:00:01Z","message":{"role":"user","content":"Explain the fixture."}}
+{"type":"message","id":"old","parentId":"root","timestamp":"2026-01-01T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Abandoned reply."}]}}
+{"type":"message","id":"active","parentId":"root","timestamp":"2026-01-01T10:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"Active reply."}]}}
+{"type":"message","id":"tool","parentId":"active","timestamp":"2026-01-01T10:00:04Z","message":{"role":"toolResult","content":[{"type":"text","text":"synthetic tool output"}]}}
+{"type":"session_info","id":"name","parentId":"tool","timestamp":"2026-01-01T10:00:05Z","name":"Named Pi fixture"}

@@ -1,0 +1,3 @@
+{"uuid":"prompt","sessionId":"qwen-fixture","type":"user","cwd":"__FIXTURE_CWD__","timestamp":"2026-11-23T01:01:00Z","message":{"role":"user","parts":[{"text":"Inspect queue retries"}]}}
+{"uuid":"answer","sessionId":"qwen-fixture","type":"assistant","cwd":"__FIXTURE_CWD__","timestamp":"2026-11-23T01:02:00Z","message":{"role":"model","parts":[{"text":"Private thought","thought":true},{"text":"Use bounded backoff"},{"functionCall":{"name":"test"}}]}}
+{"uuid":"title","sessionId":"qwen-fixture","type":"system","cwd":"__FIXTURE_CWD__","subtype":"custom_title","timestamp":"2026-11-23T01:03:00Z","systemPayload":{"customTitle":"Qwen queue retries","titleSource":"manual"}}

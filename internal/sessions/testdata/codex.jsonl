@@ -1,0 +1,7 @@
+{"type":"session_meta","timestamp":"2026-01-01T10:00:00Z","payload":{"id":"codex-fixture","cwd":"__FIXTURE_CWD__","timestamp":"2026-01-01T10:00:00Z","source":"cli"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>fixture</environment_context>"}]}}
+{"type":"response_item","timestamp":"2026-01-01T10:00:01.1Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the sample project."},{"type":"input_image","image_url":"data:fixture"}]}}
+{"type":"event_msg","timestamp":"2026-01-01T10:00:01.2Z","payload":{"type":"user_message","message":"Inspect the sample project."}}
+{"type":"response_item","payload":{"type":"function_call","name":"fixture","arguments":"{}"}}
+{"type":"event_msg","timestamp":"2026-01-01T10:00:02Z","payload":{"type":"agent_message","message":"The sample builds."}}
+{"type":"response_item","timestamp":"2026-01-01T10:00:02.1Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The sample builds."}]}}

@@ -1,0 +1,6 @@
+{"type":"user","sessionId":"claude-fixture","uuid":"user-1","cwd":"__FIXTURE_CWD__","timestamp":"2026-01-01T11:00:00+01:00","message":{"role":"user","content":"Describe the sample."}}
+{"type":"assistant","sessionId":"claude-fixture","uuid":"assistant-1","timestamp":"2026-01-01T10:00:03Z","message":{"id":"api-message","role":"assistant","content":[{"type":"thinking","thinking":"synthetic ignored block"},{"type":"text","text":"It is a fixture."},{"type":"text","text":"It uses fake data."}]}}
+{"type":"user","sessionId":"claude-fixture","uuid":"tool-result-1","message":{"role":"user","content":[{"type":"tool_result","content":"fixture output"}]}}
+{"type":"user","isMeta":true,"sessionId":"claude-fixture","uuid":"meta-1","message":{"role":"user","content":"synthetic metadata"}}
+{"type":"custom-title","sessionId":"claude-fixture","customTitle":"Fixture title"}
+{"type":"summary","sessionId":"claude-fixture","summary":"lower-priority title"}

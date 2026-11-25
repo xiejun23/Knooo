@@ -1,0 +1,5 @@
+{"id":"event-1","type":"session.start","timestamp":"2026-11-23T01:00:00Z","data":{"sessionId":"copilot-fixture","startTime":"2026-11-23T01:00:00Z","context":{"cwd":"__FIXTURE_CWD__"}}}
+{"id":"event-2","type":"user.message","timestamp":"2026-11-23T01:01:00Z","data":{"content":"Inspect report timezone"}}
+{"id":"event-3","type":"assistant.message","timestamp":"2026-11-23T01:02:00Z","data":{"messageId":"answer","content":"Use UTC for report queries","reasoningText":"Private thought"}}
+{"id":"event-4","type":"session.title_changed","timestamp":"2026-11-23T01:03:00Z","data":{"title":"Copilot report timezone"}}
+{"id":"event-5","type":"user.message","timestamp":"2026-11-23T01:04:00Z","data":{"content":"Keep going","isAutopilotContinuation":true}}

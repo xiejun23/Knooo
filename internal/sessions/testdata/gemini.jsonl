@@ -1,0 +1,7 @@
+{"sessionId":"gemini-fixture","projectHash":"project-hash","startTime":"2026-11-23T01:00:00Z","lastUpdated":"2026-11-23T01:00:00Z"}
+{"id":"prompt","type":"user","timestamp":"2026-11-23T01:01:00Z","content":[{"text":"Inspect pagination"}]}
+{"id":"discarded","type":"gemini","timestamp":"2026-11-23T01:02:00Z","content":"Discarded branch"}
+{"$rewindTo":"discarded"}
+{"id":"answer","type":"gemini","timestamp":"2026-11-23T01:03:00Z","content":"Draft reply"}
+{"$patch":{"updates":[{"id":"answer","content":[{"text":"Added cursor pagination"},{"text":"Private thought","thought":true}]}],"orderIds":["prompt","answer"]}}
+{"$set":{"summary":"Gemini pagination","lastUpdated":"2026-11-23T01:04:00Z"}}
