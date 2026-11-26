@@ -29,6 +29,53 @@ func isolatedStore(t *testing.T) (*Store, string) {
 	return New(home), home
 }
 
+func TestScanPreservesCodexTextAfterContext(t *testing.T) {
+	store, home := isolatedStore(t)
+	rows := []string{
+		`{"type":"session_meta","payload":{"id":"mixed-context","timestamp":"2026-01-01T10:00:00Z"}}`,
+		`{"type":"event_msg","timestamp":"2026-01-01T10:00:01Z","payload":{"type":"user_message","message":"<environment_context>fixture</environment_context>"}}`,
+		`{"type":"event_msg","timestamp":"2026-01-01T10:00:02Z","payload":{"type":"user_message","message":"<environment_context>fixture</environment_context>\n<user_instructions>fixture</user_instructions>\n请检查导入规则。"}}`,
+		`{"type":"response_item","timestamp":"2026-01-01T10:00:03Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md 迁移方案\n请核对标题。"}]}}`,
+		`{"type":"response_item","timestamp":"2026-01-01T10:00:04Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /work/demo\n<INSTRUCTIONS>fixture</INSTRUCTIONS>\n请保留这个请求。"}]}}`,
+		`{"type":"event_msg","timestamp":"2026-01-01T10:00:05Z","payload":{"type":"user_message","message":"<environment_context>请解释这段未闭合的标签。"}}`,
+	}
+	putFile(t, filepath.Join(home, ".codex", "sessions", "rollout-mixed-context.jsonl"), []byte(strings.Join(rows, "\n")))
+	items := scanClean(t, store, nil)
+	if len(items) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(items))
+	}
+	requireMessages(t, items[0], []int{3, 4, 5, 6},
+		"请检查导入规则。", "# AGENTS.md 迁移方案\n请核对标题。", "请保留这个请求。", "<environment_context>请解释这段未闭合的标签。")
+}
+
+func TestScanReusesMessageRevisions(t *testing.T) {
+	store, home := isolatedStore(t)
+	path := filepath.Join(home, ".codex", "sessions", "rollout-revisions.jsonl")
+	putFile(t, path, []byte(`{"type":"session_meta","payload":{"id":"revisions"}}`+"\n"+
+		`{"type":"event_msg","payload":{"type":"user_message","message":"First turn."}}`+"\n"))
+	const id = "codex:revisions"
+	first, _, report := store.Scan(nil)
+	if len(first) != 1 || report.MessageRevisions[id] != MessageRevision(first[0].Messages) {
+		t.Fatal("first scan returned an invalid revision")
+	}
+	revision := report.MessageRevisions[id]
+	report.MessageRevisions[id] = "caller edit"
+	first[0].Messages[0].Text = "caller edit"
+
+	second, _, report := store.Scan(nil)
+	if len(second) != 1 || report.MessageRevisions[id] != revision ||
+		report.MessageRevisionTime != 0 || second[0].Messages[0].Text != "First turn." {
+		t.Fatal("warm scan did not reuse the cached revision and messages")
+	}
+
+	appendFile(t, path, `{"type":"event_msg","payload":{"type":"agent_message","message":"Second turn."}}`+"\n")
+	updated, _, report := store.Scan(nil)
+	if len(updated) != 1 || report.MessageRevisions[id] == revision ||
+		report.MessageRevisions[id] != MessageRevision(updated[0].Messages) {
+		t.Fatal("appended message did not update the revision")
+	}
+}
+
 func TestDiscoverWorkBuddyAndDeepSeekHarness(t *testing.T) {
 	store, home := isolatedStore(t)
 	project := filepath.Join(home, "app")

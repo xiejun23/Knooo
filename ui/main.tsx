@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type React
 import { Archive, ArchiveRestore, ArrowLeft, ArrowRight, ArrowUpRight, BookOpen, CalendarDays, Check, ChevronDown, ChevronRight, CircleHelp, Copy, FileStack, FileText, Folder, FolderGit2, LayoutList, ListChecks, ListTree, MessagesSquare, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, RefreshCw, ScanText, Search, SlidersHorizontal, SquareTerminal, X } from 'lucide-react';
 import { ModelPicker, SettingsWorkspace, type Connections, type Profile } from './models';
 import { PanelGrip } from './panels';
+import { Pagination } from './pagination';
 import { AgentBadge, AgentPicker, agentKey, agentName, agentQuery, countAgents, type AgentSource } from './agents';
 import { displayPath, displayScanWarning, homeRelativePath, locationKey, locationLabel, type Location } from './paths';
 import { EagleLoading, EagleMark } from './eagle';
@@ -14,15 +15,18 @@ type Page = 'review' | 'search' | 'sessions' | 'notes' | 'reports' | 'logs' | 's
 type Session = AgentSource & { id: string; project: string; projectPath: string; platform:string; wsl?:string; sourceRoot:string; title: string; cwd: string; path: string; start: string; updated: string; parentId?: string; archived?:boolean; count: number; messages?: Message[] };
 type Message = { id: string; role: string; text: string; timestamp: string; line: number };
 type ProjectSource = Location & {project:string;projectPath:string};
-type Topic = { title: string; problem: string; approach?:string; outcome: string; status: string; lesson: string; exercise: string; evidence: string[] };
+type Topic = { title: string; problem: string; approach?:string; outcome: string; status: string; lesson: string; exercise: string; evidence: string[]; evidenceVersions?:Record<string,string>; evidenceStale?:boolean };
 type ReviewEntry = { session:Session; state:'ready'|'queued'|'running'|'cooldown'|'skipped'|'error'|'disabled'; topics?:Topic[] };
 type Review = { connectionId:string; error?:string; settingsError?:boolean; entries:ReviewEntry[] };
-type Detail = { session: Session; topics: Topic[] | null; generated: boolean };
-type DistillPlan = { inputBudget:number; outputBudget:number; estimatedInput:number; included:number; total:number; shortened:boolean; confirmation:string };
-type Match = { sessionId: string; messageId: string; snippet: string };
-type Hit = AgentSource & { sessionId: string; project: string; topic: Topic; matches: Match[] };
+type Detail = { session: Session; topics: Topic[] | null; generated: boolean; staleAnchor?:boolean };
+type DistillPlan = { inputBudget:number; outputBudget:number; totalOutputBudget?:number; thinkingBudget?:number; estimatedInput:number; included:number; total:number; shortened:boolean; confirmation:string };
+type Match = { sessionId: string; messageId: string; snippet: string; evidenceVersion?:string };
+type Hit = AgentSource & { sessionId: string; project: string; topic: Topic; matches: Match[]; moreMatches?:string[] };
+type SearchPage = { hits:Hit[]; page:number; pageSize:number; total:number };
+type SearchMatchPage = { matches:Match[]; hasMore:boolean };
 type Note = { id: number; sessionId: string; topic: Topic };
-type ReaderFocus = {id:string;anchor?:string;tab:'topic'|'raw'};
+type ReaderFocus = {id:string;anchor?:string;tab:'topic'|'raw';evidenceVersion?:string};
+type OpenSession = (id:string,anchor?:string,tab?:ReaderFocus['tab'],evidenceVersion?:string)=>void;
 type ScanEnvironment = Location & { home?:string; state:string };
 type ScanRoot = Location & AgentSource & { directory:string; state:string; sessions:number };
 type Coverage = { environments:ScanEnvironment[]; roots:ScanRoot[] };
@@ -87,7 +91,8 @@ function App() {
  const [storedAgents, setAgents] = useState<string[]>([]);
  const [query, setQuery] = useState('');
  const [searched, setSearched] = useState('');
- const [hits, setHits] = useState<Hit[]>([]);
+ const [searchResult, setSearchResult] = useState<SearchPage>();
+ const [searchPosition, setSearchPosition] = useState({scope:'',page:1});
  const [searching, setSearching] = useState(false);
  const [notes, setNotes] = useState<Note[]>();
  const [focus, setFocus] = useState<ReaderFocus>();
@@ -157,6 +162,8 @@ function App() {
  const selectedProject = projects.find(([key])=>key===project)?.[1];
  const projectPath = displayPath(selectedProject?.projectPath ?? '');
  const projectLocation = selectedProject ? locationKey(selectedProject) : '';
+ const searchScope = agentQuery({q:searched,project:projectPath,location:projectLocation},selectedAgents).toString();
+ const searchPage = searchPosition.scope===searchScope ? searchPosition.page : 1;
  const sessionMap = useMemo(() => new Map(listing.sessions.map(session => [session.id, session])), [listing]);
  const fail = (err:unknown) => setError(err instanceof Error ? err.message : String(err));
  function collapseReader() { setReaderCollapsed(true);readerToggle.current?.focus(); }
@@ -176,7 +183,7 @@ function App() {
   setNotice('已存入知识库。');
  }
  function navigate(next:Page, fromReview=false) { setPage(next);setReviewLogs(fromReview);setError('');setNotice(''); }
- function open(id:string, anchor?:string, tab:ReaderFocus['tab']=anchor ? 'raw' : 'topic') { setFocus({id,anchor,tab});setReaderCollapsed(false); }
+ function open(id:string, anchor?:string, tab:ReaderFocus['tab']=anchor ? 'raw' : 'topic', evidenceVersion?:string) { setFocus({id,anchor,tab,evidenceVersion});setReaderCollapsed(false); }
  function selectProfile(id:string) { setProfileId(id);setModel(connections.profiles.find(p=>p.id===id)?.model ?? ''); }
  async function loadConnections() {
   const next = await api<Connections>('connections');
@@ -273,12 +280,14 @@ function App() {
   if (page !== 'search' || !searched) return;
   const controller = new AbortController();
   setSearching(true);
-  api<Hit[]>(`search?${agentQuery({q:searched,project:projectPath,location:projectLocation},selectedAgents)}`,undefined,controller.signal)
-   .then(next=>{if (!controller.signal.aborted) setHits(next);})
-   .catch(err=>{if (!controller.signal.aborted) {setHits([]);fail(err);}})
+  const params = new URLSearchParams(searchScope);
+  params.set('page',String(searchPage));
+  api<SearchPage>(`search?${params}`,undefined,controller.signal)
+   .then(next=>{if (!controller.signal.aborted) setSearchResult(next);})
+   .catch(err=>{if (!controller.signal.aborted) {setSearchResult(undefined);fail(err);}})
    .finally(()=>{if (!controller.signal.aborted) setSearching(false);});
   return () => controller.abort();
- },[page,searched,projectPath,projectLocation,selectedAgents,listing]);
+ },[page,searched,searchScope,searchPage,listing]);
  useEffect(() => {
   if (page!=='notes') return;
   const controller = new AbortController();
@@ -296,7 +305,7 @@ function App() {
   document.addEventListener('keydown',shortcut);
   return () => document.removeEventListener('keydown',shortcut);
  },[]);
- function search(e:FormEvent) { e.preventDefault();if (!query.trim()) return;setSearched(query.trim());navigate('search'); }
+ function search(e:FormEvent) { e.preventDefault();if (!query.trim()) return;setSearched(query.trim());setSearchPosition({scope:'',page:1});navigate('search'); }
  const filter = <div className="filters"><AgentPicker counts={activeAgents} selected={selectedAgents} onChange={setAgents}/><label className="select"><Folder size={16}/><select aria-label="项目" title={selectedProject ? projectOrigin(selectedProject) : '全部项目'} value={selectedProject ? project : ''} onChange={e=>setProject(e.target.value)}><option value="">全部项目</option>{projects.map(([key,session])=><option key={key} value={key}>{session.project} · {projectOrigin(session)}</option>)}</select><ChevronDown size={13}/></label></div>;
  const scanning = refreshing || loadingListing;
  const refreshAction = about?.demo ? undefined : <button className="button secondary" disabled={scanning} onClick={()=>void refresh()}>{refreshing && ready ? <EagleMark flying/> : <RefreshCw size={16}/>} {scanning ? '正在发现会话' : '刷新会话'}</button>;
@@ -333,11 +342,12 @@ function App() {
     {page==='search' && <>
      <Heading title="搜索" description="查找会话原文、标题或来源路径。"/>
      <form className="search-page-form" onSubmit={search}><Search size={21}/><input aria-label="搜索关键字" placeholder="输入关键字、错误码或文件路径" value={query} onChange={e=>setQuery(e.target.value)}/><button className="button primary" type="submit">搜索</button></form>
-     <div className="review-controls">{filter}{searched && !searching && !error && <span className="muted">{hits.length} 条结果</span>}</div>
-     {searching ? <EagleLoading label="正在搜索会话"/> : hits.map(h=><SearchResult key={h.sessionId} hit={h} sessions={sessionMap} open={open}/>)}
-     {!searching && !error && hits.length===0 && <Empty icon={<Search size={25}/>} title={searched ? '没有匹配的会话' : '搜索会话'}><p>{searched ? '试试缩短关键字，或调整筛选范围。' : '输入一个工作中记得的关键词。'}</p></Empty>}
+     <div className="review-controls">{filter}</div>
+     {searching ? <EagleLoading label="正在搜索会话"/> : searchResult?.hits.map(h=><SearchResult key={h.sessionId} hit={h} sessions={sessionMap} open={open} searchScope={searchScope}/>)}
+     {!searching && searchResult && <Pagination label="搜索结果分页" page={searchResult.page} pageSize={searchResult.pageSize} total={searchResult.total} onPageChange={next=>{setError('');setSearchPosition({scope:searchScope,page:next});}}/>}
+     {!searching && !error && !searchResult?.hits.length && <Empty icon={<Search size={25}/>} title={searched ? '没有匹配的会话' : '搜索会话'}><p>{searched ? '试试缩短关键字，或调整筛选范围。' : '输入一个工作中记得的关键词。'}</p></Empty>}
     </>}
-    {page==='notes' && <><Heading title="知识库" description="把会话里值得复用的经验和练习保存下来。"/>{!notes ? <EagleLoading label="正在读取知识库"/> : notes.map(n=><article className="search-hit" key={n.id}><h3>{n.topic.title}</h3><p>{n.topic.lesson || n.topic.outcome || n.topic.problem}</p>{n.topic.exercise && <p className="muted">练习 · {n.topic.exercise}</p>}<button className="button secondary" onClick={()=>open(n.sessionId,n.topic.evidence[0])}>查看原文 <ArrowUpRight size={15}/></button></article>)}{notes?.length===0 && !error && <Empty icon={<BookOpen size={25}/>} title="还没有知识条目"><p>打开一条会话，在主题里点击「存入知识库」。</p><button className="button secondary" onClick={()=>navigate('sessions')}>查看会话 <ArrowRight size={15}/></button></Empty>}</>}
+    {page==='notes' && <><Heading title="知识库" description="把会话里值得复用的经验和练习保存下来。"/>{!notes ? <EagleLoading label="正在读取知识库"/> : notes.map(n=><article className="search-hit" key={n.id}><h3>{n.topic.title}</h3><p>{n.topic.lesson || n.topic.outcome || n.topic.problem}</p>{n.topic.exercise && <p className="muted">练习 · {n.topic.exercise}</p>}{n.topic.evidenceStale && <p className="feedback error">原文依据已变更或需要核对。</p>}<button className="button secondary" onClick={()=>{const id=n.topic.evidenceStale ? undefined : n.topic.evidence[0];open(n.sessionId,id,'raw',id ? n.topic.evidenceVersions?.[id] : undefined);}}>查看原文 <ArrowUpRight size={15}/></button></article>)}{notes?.length===0 && !error && <Empty icon={<BookOpen size={25}/>} title="还没有知识条目"><p>打开一条会话，在主题里点击「存入知识库」。</p><button className="button secondary" onClick={()=>navigate('sessions')}>查看会话 <ArrowRight size={15}/></button></Empty>}</>}
     {page==='reports' && <><Heading title="工作报告" description="从工作回顾提炼所选期间的成果、发现和下一步。"/><Reports listing={listing} agentCounts={activeAgents} selectedAgents={selectedAgents} onAgentsChange={setAgents} profiles={connections.profiles} onOpen={open} fail={fail}/></>}
     {page==='logs' && <><Heading title="平台日志" description="按级别、模块与时间范围排查会话扫描、自动回顾和模型连接记录。"/><PlatformLogs key={String(reviewLogs)} api={api} sessions={sessionMap} reviewOnly={reviewLogs} open={id=>open(id,undefined,'raw')}/></>}
     {page==='settings' && <><Heading title="本机设置" description="管理接入平台的算力提供商与后台默认调用配置。"/>{loadingConnections || about===undefined ? <EagleLoading label="正在读取本机设置"/> : <SettingsWorkspace connections={connections} api={api} onChange={loadConnections} demo={about?.demo===true}/>}</>}
@@ -399,20 +409,24 @@ function matchesReviewQuery(topic:Topic, session:Session, query:string) {
 function ReviewTopicCard({topic,sessionTitle,sessionId,demo,onSaveNote,open}:{
  topic:Topic; sessionTitle:string; sessionId:string; demo:boolean;
  onSaveNote:(sessionId:string,topic:Topic)=>Promise<void>;
- open:(id:string,anchor?:string,tab?:ReaderFocus['tab'])=>void;
+ open:OpenSession;
 }) {
  const [allEvidence,setAllEvidence] = useState(false);
  const [savingNote,setSavingNote] = useState(false);
  const [savedNote,setSavedNote] = useState(false);
+ const [saveError,setSaveError] = useState('');
  const heading = topic.title && topic.title!==sessionTitle ? topic.title : topic.problem;
  const visibleEvidence = allEvidence ? topic.evidence : topic.evidence.slice(0,4);
  const hiddenEvidence = topic.evidence.length - visibleEvidence.length;
  async function handleSave() {
   if (savingNote || savedNote) return;
   setSavingNote(true);
+  setSaveError('');
   try {
    await onSaveNote(sessionId, topic);
    setSavedNote(true);
+  } catch (err) {
+   setSaveError(err instanceof Error ? err.message : String(err));
   } finally {
    setSavingNote(false);
   }
@@ -425,7 +439,7 @@ function ReviewTopicCard({topic,sessionTitle,sessionId,demo,onSaveNote,open}:{
   </dl>
   <div className="review-topic-foot">
    <div className="topic-evidence">
-    {visibleEvidence.map((id,index)=><button key={id} className="button text-button" onClick={()=>open(sessionId,id)}>依据 {index+1} <ArrowUpRight size={13}/></button>)}
+    {visibleEvidence.map((id,index)=><button key={id} className="button text-button" onClick={()=>open(sessionId,id,'raw',topic.evidenceVersions?.[id])}>依据 {index+1} <ArrowUpRight size={13}/></button>)}
     {hiddenEvidence>0 && <button type="button" className="button text-button review-more-evidence" onClick={()=>setAllEvidence(true)}>+{hiddenEvidence} 条依据</button>}
     {allEvidence && topic.evidence.length>4 && <button type="button" className="button text-button review-more-evidence" onClick={()=>setAllEvidence(false)}>收起依据</button>}
    </div>
@@ -433,6 +447,7 @@ function ReviewTopicCard({topic,sessionTitle,sessionId,demo,onSaveNote,open}:{
     {savedNote ? <><Check size={13}/>已存知识库</> : <><BookOpen size={13}/>{savingNote ? '保存中…' : '存入知识库'}</>}
    </button>}
   </div>
+  {saveError && <p className="feedback error" role="alert">{saveError}</p>}
  </li>;
 }
 
@@ -441,7 +456,7 @@ function ReviewSessionBlock({entry,focusedMode,statusFilter,searchTerm,demo,canR
  demo:boolean; canRetry:boolean;
  onRetry:(id:string)=>Promise<void>;
  onSaveNote:(sessionId:string,topic:Topic)=>Promise<void>;
- open:(id:string,anchor?:string,tab?:ReaderFocus['tab'])=>void;
+ open:OpenSession;
 }) {
  const [showAllPrimary,setShowAllPrimary] = useState(false);
  const [showSecondary,setShowSecondary] = useState(false);
@@ -525,7 +540,7 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
  demo:boolean; onSettings:()=>void; onLogs:()=>void;
  onRetry:(id:string)=>Promise<void>;
  onSaveNote:(sessionId:string,topic:Topic)=>Promise<void>;
- open:(id:string,anchor?:string,tab?:ReaderFocus['tab'])=>void;
+ open:OpenSession;
 }) {
  const [viewMode,setViewMode] = useState<'focused'|'all'>('focused');
  const [statusFilter,setStatusFilter] = useState<ReviewStatusFilter>('all');
@@ -657,7 +672,7 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
  </>;
 }
 
-function SearchResult({hit,sessions,open}: {hit:Hit;sessions:Map<string,Session>;open:(id:string,anchor?:string,tab?:ReaderFocus['tab'])=>void}) {
+function SearchResult({hit,sessions,open,searchScope}: {hit:Hit;sessions:Map<string,Session>;open:OpenSession;searchScope:string}) {
  const project = sessions.get(hit.sessionId);
  const sources = new Map<string,Match[]>();
  for (const match of hit.matches) {
@@ -670,16 +685,45 @@ function SearchResult({hit,sessions,open}: {hit:Hit;sessions:Map<string,Session>
   {project?.projectPath && <div className="result-project-path" title={project.projectPath}>{displayPath(project.projectPath)}</div>}
   <button className="text-button result-title" onClick={()=>open(hit.sessionId)}>{hit.topic.title}<ArrowUpRight size={16}/></button>
   {hit.topic.outcome && <p>{hit.topic.outcome}</p>}
-  {[...sources].map(([id,matches])=>{
-   const session=sessions.get(id);
-   return <div className="result-transcript" key={id}>
-    {session && <button className="text-button transcript-link" onClick={()=>open(id,undefined,'raw')}>
-     <FileText size={15}/><span><strong>{locationLabel(session)}</strong><code title={session.path}>{displayPath(session.path)}</code></span><ArrowUpRight size={14}/>
-    </button>}
-    {matches.filter(m=>m.messageId).map(m=><button className="evidence-link" key={m.messageId} onClick={()=>open(id,m.messageId)}><span>{m.snippet}</span><ArrowRight size={15}/></button>)}
-   </div>;
-  })}
+  {[...sources].map(([id,matches])=><SearchTranscript key={id} id={id} session={sessions.get(id)} matches={matches}
+   hasMore={hit.moreMatches?.includes(id) ?? false} open={open} searchScope={searchScope}/>)}
  </article>;
+}
+
+function SearchTranscript({id,session,matches,hasMore,open,searchScope}:{
+ id:string;session?:Session;matches:Match[];hasMore:boolean;open:OpenSession;searchScope:string;
+}) {
+ const [extra,setExtra] = useState<SearchMatchPage>();
+ const [busy,setBusy] = useState(false);
+ const [error,setError] = useState('');
+ const active = useRef<AbortController | null>(null);
+ useEffect(()=>()=>active.current?.abort(),[]);
+ async function loadMore() {
+  const controller = new AbortController();
+  active.current = controller;
+  setBusy(true);
+  setError('');
+  const params = new URLSearchParams(searchScope);
+  params.set('session',id);
+  params.set('offset',String(matches.length + (extra?.matches.length ?? 0)));
+  try {
+   const next = await api<SearchMatchPage>(`search/matches?${params}`,undefined,controller.signal);
+   if (!controller.signal.aborted) setExtra(previous=>({matches:[...(previous?.matches ?? []),...next.matches],hasMore:next.hasMore}));
+  } catch (err) {
+   if (!controller.signal.aborted) setError(err instanceof Error ? err.message : String(err));
+  } finally {
+   if (!controller.signal.aborted) setBusy(false);
+  }
+ }
+ return <div className="result-transcript">
+  {session && <button className="text-button transcript-link" onClick={()=>open(id,undefined,'raw')}>
+   <FileText size={15}/><span><strong>{locationLabel(session)}</strong><code title={session.path}>{displayPath(session.path)}</code></span><ArrowUpRight size={14}/>
+  </button>}
+  {[...new Map([...matches,...(extra?.matches ?? [])].filter(m=>m.messageId).map(m=>[m.messageId,m])).values()].map(m=>
+   <button className="evidence-link" key={m.messageId} onClick={()=>open(id,m.messageId,'raw',m.evidenceVersion)}><span>{m.snippet}</span><ArrowRight size={15}/></button>)}
+  {(extra?.hasMore ?? hasMore) && <button className="button text-button" type="button" disabled={busy} onClick={()=>void loadMore()}>{busy ? '正在读取…' : '加载更多匹配消息'}</button>}
+  {error && <p className="feedback error" role="alert">{error}</p>}
+ </div>;
 }
 
 const scanLabels:Record<string,string> = {
@@ -944,11 +988,26 @@ function Reader({focus,setFocus,collapsed,close,profile,model,modelPicker,panelG
  const [saving,setSaving]=useState<string>();
  const [confirm,setConfirm]=useState<DistillPlan>();
  const scroller=useRef<HTMLDivElement>(null);
- useEffect(()=>{const c=new AbortController();api<Detail>(`session?${new URLSearchParams({id:focus.id})}`,undefined,c.signal).then(setDetail).catch(e=>{if(!c.signal.aborted)setError(e.message);});return()=>c.abort();},[focus.id]);
+ const [checkedReference,setCheckedReference] = useState('');
+ const reference = focus.evidenceVersion && focus.anchor ? `${focus.anchor}:${focus.evidenceVersion}` : '';
  useEffect(()=>{
-  if (focus.tab==='raw' && focus.anchor && detail) document.getElementById(`message-${focus.anchor}`)?.scrollIntoView({block:'nearest'});
+  const controller = new AbortController();
+  const params = new URLSearchParams({id:focus.id});
+  if (focus.anchor && focus.evidenceVersion) {
+   params.set('anchor',focus.anchor);
+   params.set('evidenceVersion',focus.evidenceVersion);
+  }
+  api<Detail>(`session?${params}`,undefined,controller.signal)
+   .then(next=>{if(!controller.signal.aborted) {setDetail(next);setCheckedReference(reference);}})
+   .catch(err=>{if(!controller.signal.aborted) setError(err.message);});
+  return ()=>controller.abort();
+ },[focus.id,focus.anchor,focus.evidenceVersion,reference]);
+ const checked = !reference || reference===checkedReference;
+ const activeAnchor = checked && (!reference || !detail?.staleAnchor) ? focus.anchor : undefined;
+ useEffect(()=>{
+  if (focus.tab==='raw' && activeAnchor && detail) document.getElementById(`message-${activeAnchor}`)?.scrollIntoView({block:'nearest'});
   else if (scroller.current) scroller.current.scrollTop=0;
- },[focus.tab,focus.anchor,detail]);
+ },[focus.tab,activeAnchor,detail]);
  useEffect(()=>{setConfirm(undefined);},[profile?.id,model]);
  function distillRequest() {
   return {id:focus.id,connectionId:demo ? '' : profile?.id,model:demo ? '' : model.trim()};
@@ -971,16 +1030,58 @@ function Reader({focus,setFocus,collapsed,close,profile,model,modelPicker,panelG
  const size=detail?.session.messages?.length ?? 0;
  return <aside data-collapsed={collapsed} className="reader" id="session-reader" aria-label="会话阅读器">{panelGrip}<div className="reader-top"><span><MessagesSquare size={17}/> 会话阅读器</span><button className="icon-button" onClick={close} aria-label="收起会话阅读器" title="收起阅读器"><PanelRightClose size={18}/></button></div>{detail && <><div className="reader-intro"><div className="result-source"><AgentBadge source={detail.session}/><span>{detail.session.project}</span><span>{locationLabel(detail.session)}</span></div><h2>{detail.session.title}</h2><div className="reader-meta">{size} 条消息 · {formatTime(detail.session.updated)}</div></div><div className="reader-tabs"><button aria-pressed={focus.tab==='topic'} onClick={()=>setFocus({id:focus.id,tab:'topic'})}><ScanText size={15}/> 主题</button><button aria-pressed={focus.tab==='raw'} onClick={()=>setFocus({id:focus.id,tab:'raw'})}><FileText size={15}/> 原文</button></div></>}
  <div className="reader-body" ref={scroller}>{error && <p className="feedback error" role="alert">{error}</p>}{!detail && !error && <EagleLoading label="正在读取会话"/>}{detail && <details className="source-coverage session-source" open={focus.tab==='raw'}><summary><Folder size={16}/><strong>会话来源</strong><span>{locationLabel(detail.session)}</span></summary><SessionPaths session={detail.session}/></details>}
- {detail && (focus.tab==='raw' ? <>{focus.anchor && !detail.session.messages?.some(m=>m.id===focus.anchor) && <p className="feedback error" role="status">引用的消息已变更，可浏览当前原文。</p>}{detail.session.messages?.map(m=><article id={`message-${m.id}`} key={m.id} className={`message ${focus.anchor===m.id ? 'highlighted' : ''}`}><div><strong>{m.role==='user' ? '用户' : m.role==='assistant' ? agentName(detail.session) : m.role}</strong><span>{detail.session.agent==='antigravity' ? `步骤 ${m.line}` : `第 ${m.line} 行`} · {formatTime(m.timestamp)}</span></div><p>{m.text}</p></article>)}</>:<>{modelPicker(busy || !!confirm)}<div className="extract-bar"><span className="muted">{detail.generated ? '已保存的主题' : '本地摘录'}</span><button className="button primary" disabled={busy || !!confirm || size===0 || !!profile && (!profile.ready || !model.trim())} onClick={()=>{if(!profile || demo) void generate();else void preview();}}>{busy ? <EagleMark flying/> : <ScanText size={15}/>} {busy ? '正在处理会话…' : detail.generated ? '重新提炼' : '提炼会话'}</button></div>{confirm && <div className="confirm"><p>通过「{profile?.name}」向 <strong>{model}</strong> 发送 {confirm.included} / {confirm.total} 条消息。</p>
- <p>预计输入 {confirm.estimatedInput.toLocaleString()} / {confirm.inputBudget.toLocaleString()} token，输出最多 {confirm.outputBudget.toLocaleString()} token。</p>
+ {detail && (focus.tab==='raw' ? <>{focus.anchor && checked && (!activeAnchor || !detail.session.messages?.some(m=>m.id===activeAnchor)) && <p className="feedback error" role="status">引用的消息已变更，可浏览当前原文。</p>}{detail.session.messages?.map(m=><article id={`message-${m.id}`} key={m.id} className={`message ${activeAnchor===m.id ? 'highlighted' : ''}`}><div><strong>{m.role==='user' ? '用户' : m.role==='assistant' ? agentName(detail.session) : m.role}</strong><span>{detail.session.agent==='antigravity' ? `步骤 ${m.line}` : `第 ${m.line} 行`} · {formatTime(m.timestamp)}</span></div><p>{m.text}</p></article>)}</>:<>{modelPicker(busy || !!confirm)}<div className="extract-bar"><span className="muted">{detail.generated ? '已保存的主题' : '本地摘录'}</span><button className="button primary" disabled={busy || !!confirm || size===0 || !!profile && (!profile.ready || !model.trim())} onClick={()=>{if(!profile || demo) void generate();else void preview();}}>{busy ? <EagleMark flying/> : <ScanText size={15}/>} {busy ? '正在处理会话…' : detail.generated ? '重新提炼' : '提炼会话'}</button></div>{confirm && <div className="confirm"><p>通过「{profile?.name}」向 <strong>{model}</strong> 发送 {confirm.included} / {confirm.total} 条消息。</p>
+ <p>预计输入 {confirm.estimatedInput.toLocaleString()} / {confirm.inputBudget.toLocaleString()} token，输出最多 {(confirm.totalOutputBudget ?? confirm.outputBudget).toLocaleString()} token{confirm.thinkingBudget ? `（正文 ${confirm.outputBudget.toLocaleString()}，思考 ${confirm.thinkingBudget.toLocaleString()}）` : ''}。</p>
  {(confirm.included<confirm.total || confirm.shortened) && <p>超出预算时优先保留近期消息。{confirm.shortened && '最新长消息只发送开头和结尾。'}</p>}
  {profile?.preset==='gateway' && <p>本地网关会按其配置处理请求，可能转发给云模型供应商。</p>}
- <button className="button secondary" onClick={()=>setConfirm(undefined)}>取消</button> <button className="button primary" onClick={()=>void generate()}>发送并提炼</button></div>}{(detail.topics ?? []).map((t,i)=><section className="topic" key={`${t.title}-${i}`}><div className="status-label">{({verified:'已验证',resolved:'已解决',open:'待处理',observed:'原文摘录'} as Record<string,string>)[t.status] ?? t.status}</div><h3>{t.title}</h3>{t.problem && <p>{t.problem}</p>}{t.outcome && <p>{t.outcome}</p>}{t.lesson && <p><strong>可复用经验</strong><br/>{t.lesson}</p>}{t.exercise && <p><strong>学习练习</strong><br/>{t.exercise}</p>}<div className="topic-evidence">{(t.evidence ?? []).map((id,j)=><button key={id} className="button secondary" onClick={()=>setFocus({id:focus.id,anchor:id,tab:'raw'})}>查看依据 {j+1}<ArrowUpRight size={14}/></button>)}</div>{t.evidence?.length>0 && <button className="button text-button" disabled={saving!==undefined || saved.includes(t.title)} onClick={()=>void save(t)}>{saving===t.title ? <EagleMark flying/> : saved.includes(t.title) ? <Check size={15}/> : <Plus size={15}/>} {saving===t.title ? '正在保存…' : saved.includes(t.title) ? '已存入知识库' : '存入知识库'}</button>}</section>)}</>)}
+ <button className="button secondary" onClick={()=>setConfirm(undefined)}>取消</button> <button className="button primary" onClick={()=>void generate()}>发送并提炼</button></div>}{(detail.topics ?? []).map((t,i)=><section className="topic" key={`${t.title}-${i}`}><div className="status-label">{({verified:'已验证',resolved:'已解决',open:'待处理',observed:'原文摘录'} as Record<string,string>)[t.status] ?? t.status}</div><h3>{t.title}</h3>{t.problem && <p>{t.problem}</p>}{t.outcome && <p>{t.outcome}</p>}{t.lesson && <p><strong>可复用经验</strong><br/>{t.lesson}</p>}{t.exercise && <p><strong>学习练习</strong><br/>{t.exercise}</p>}{t.evidenceStale ? <p className="feedback error">原文依据已变更或需要核对，可重新提炼。</p> : <div className="topic-evidence">{(t.evidence ?? []).map((id,j)=><button key={id} className="button secondary" onClick={()=>setFocus({id:focus.id,anchor:id,tab:'raw',evidenceVersion:t.evidenceVersions?.[id]})}>查看依据 {j+1}<ArrowUpRight size={14}/></button>)}</div>}{!t.evidenceStale && t.evidence?.length>0 && <button className="button text-button" disabled={saving!==undefined || saved.includes(t.title)} onClick={()=>void save(t)}>{saving===t.title ? <EagleMark flying/> : saved.includes(t.title) ? <Check size={15}/> : <Plus size={15}/>} {saving===t.title ? '正在保存…' : saved.includes(t.title) ? '已存入知识库' : '存入知识库'}</button>}</section>)}</>)}
  {parent && <button className="button secondary" onClick={()=>open(parent.id)}><ArrowLeft size={15}/> 父会话</button>}{childrenSessions.length>0 && <section className="children"><h3>子会话</h3>{childrenSessions.map(s=><button key={s.id} className="evidence-link" onClick={()=>open(s.id)}><span>{s.title}</span><ChevronRight size={15}/></button>)}</section>}</div></aside>;
 }
 
 const reportPresets = [{id:'daily',label:'日报'},{id:'weekly',label:'周报'},{id:'monthly',label:'月报'}] as const;
 type ReportKind = typeof reportPresets[number]['id'] | 'custom';
+type SavedReport = {
+ report:WorkReport|null;
+ reportRevision:number;
+ draft:WorkReport|null;
+ draftRevision:number;
+};
+type ReportView = {kind:ReportKind;range:DateInterval;projectKeyValue:string};
+type PendingReportDraft = {draft:WorkReport;revision:number;savedRevision?:number};
+const reportInFlight = new Set<string>();
+const savingReportDrafts = new Set<string>();
+const pendingReportDrafts = new Map<string,PendingReportDraft>();
+const reportDraftErrors = new Map<string,string>();
+const reportListeners = new Set<(scope:string)=>void>();
+let reportView:ReportView | undefined;
+
+function hasLegacyReportCache() {
+ try {
+  for (let index=0;index<localStorage.length;index++) {
+   const key = localStorage.key(index);
+   if (key==='knooo-reports-v1:local' || key==='knooo-reports-v1:demo') return true;
+  }
+ } catch { /* Storage can be blocked by browser settings. */ }
+ return false;
+}
+
+function warnUnsavedReport(event:BeforeUnloadEvent) {
+ event.preventDefault();
+ event.returnValue = true;
+}
+function updatePendingReport(scope:string, pending?:PendingReportDraft) {
+ if (pending) pendingReportDrafts.set(scope,pending);
+ else pendingReportDrafts.delete(scope);
+ if ([...pendingReportDrafts.values()].some(entry=>entry.savedRevision===undefined)) {
+  window.addEventListener('beforeunload',warnUnsavedReport);
+ } else {
+  window.removeEventListener('beforeunload',warnUnsavedReport);
+ }
+}
+function notifyReportListeners(scope:string) {
+ for (const listener of reportListeners) listener(scope);
+}
+
 const twoDigits = (value:number)=>String(value).padStart(2,'0');
 function localTimestamp(date:Date) {
  const offset = -date.getTimezoneOffset();
@@ -988,15 +1089,18 @@ function localTimestamp(date:Date) {
 }
 function Reports({listing,agentCounts,selectedAgents,onAgentsChange,profiles,onOpen,fail}:{
  listing:Listing;agentCounts:ReadonlyMap<string,number>;selectedAgents:readonly string[];onAgentsChange:(agents:string[])=>void;profiles:Profile[];
- onOpen:(id:string,message:string)=>void;fail:(e:unknown)=>void;
+ onOpen:OpenSession;fail:(e:unknown)=>void;
 }) {
- const [kind,setKind] = useState<ReportKind>('daily');
- const [range,setRange] = useState<DateInterval>(()=>{const today=dateValue(dayStart());return {from:today,to:today};});
- const [projectKeyValue,setProject] = useState('');
+ const [view,setView] = useState<ReportView>(()=>{
+  const today = dateValue(dayStart());
+  return reportView ?? {kind:'daily',range:{from:today,to:today},projectKeyValue:''};
+ });
+ const {kind,range,projectKeyValue} = view;
  const [projectResult,setProjectResult] = useState<{query:string;projects:ProjectSource[];error?:string}>();
- const [result,setResult] = useState<{scope:string;report:WorkReport;generation:number}>();
+ const [reportResult,setReportResult] = useState<{scope:string;document?:SavedReport;error?:string}>();
+ const [legacyCache] = useState(hasLegacyReportCache);
+ const [,rerender] = useState(0);
  const [connectionId,setConnectionId] = useState('');
- const [busy,setBusy] = useState(false);
  const connection = profiles.find(profile=>profile.id===connectionId && profile.ready && profile.model);
  const {from,to}=range;
  const end = new Date(`${to}T00:00:00`);
@@ -1011,11 +1115,23 @@ function Reports({listing,agentCounts,selectedAgents,onAgentsChange,profiles,onO
   if (!groups.has(key)) groups.set(key,{label:locationLabel(item),projects:[]});
   groups.get(key)?.projects.push(item);
  }
- const scope = JSON.stringify([projectKeyValue,projectQuery,kind]);
- const request = useRef<AbortController>(null);
- const currentReport = result?.scope===scope ? result : undefined;
- useEffect(()=>()=>request.current?.abort(),[scope]);
- useEffect(()=>{setBusy(false);},[scope]);
+ const args = new URLSearchParams(projectQuery);
+ args.set('kind',kind);
+ if (selected) {
+  args.set('project',selected.projectPath);
+  args.set('location',locationKey(selected));
+ }
+ const scope = !projectKeyValue || selected ? args.toString() : '';
+ const busy = reportInFlight.has(scope);
+ const saving = savingReportDrafts.has(scope);
+ const currentResult = reportResult?.scope===scope ? reportResult : undefined;
+ const saved = currentResult?.document;
+ const pending = pendingReportDrafts.get(scope);
+ const dirty = !!pending && pending.savedRevision===undefined;
+ function updateReportView(patch:Partial<ReportView>) {
+  reportView = {...view,...patch};
+  setView(reportView);
+ }
  useEffect(()=>{
   const controller = new AbortController();
   api<{connectionId:string}>('review-settings',undefined,controller.signal).then(({connectionId})=>{
@@ -1029,45 +1145,101 @@ function Reports({listing,agentCounts,selectedAgents,onAgentsChange,profiles,onO
    if (controller.signal.aborted) return;
    projects.sort((a,b)=>a.project.localeCompare(b.project,'zh-CN') || a.projectPath.localeCompare(b.projectPath));
    setProjectResult({query:projectQuery,projects});
-   setProject(current=>projects.some(item=>projectKey(item)===current) ? current : '');
+   const currentProject = reportView?.projectKeyValue;
+   if (reportView && currentProject && !projects.some(item=>projectKey(item)===currentProject)) {
+    reportView = {...reportView,projectKeyValue:''};
+    setView(reportView);
+   }
   }).catch(err=>{
    if (!controller.signal.aborted) setProjectResult({query:projectQuery,projects:[],error:err instanceof Error ? err.message : String(err)});
   });
   return ()=>controller.abort();
  },[projectQuery,listing]);
+ useEffect(()=>{
+  if (!scope) return;
+  let controller:AbortController | undefined;
+  function load(target:string) {
+   if (target!==scope) return;
+   controller?.abort();
+   const request = new AbortController();
+   controller = request;
+   api<SavedReport>(`report/document?${scope}`,undefined,request.signal).then(document=>{
+    if (request.signal.aborted) return;
+    const entry = pendingReportDrafts.get(scope);
+    if (entry?.savedRevision!==undefined && entry.savedRevision<=document.draftRevision) updatePendingReport(scope);
+    setReportResult({scope,document});
+   }).catch(err=>{
+    if (!request.signal.aborted) setReportResult(current=>({
+     scope,document:current?.scope===scope ? current.document : undefined,
+     error:err instanceof Error ? err.message : String(err),
+    }));
+   });
+  }
+  reportListeners.add(load);
+  load(scope);
+  return ()=>{
+   controller?.abort();
+   reportListeners.delete(load);
+  };
+ },[scope]);
  function selectPreset(next:typeof reportPresets[number]['id']) {
   const today = dayStart();
   const start = next==='weekly' ? dayStart(-((today.getDay()+6)%7)) : next==='monthly' ? new Date(today.getFullYear(),today.getMonth(),1) : today;
-  setKind(next);setRange({from:dateValue(start),to:dateValue(today)});
+  updateReportView({kind:next,range:{from:dateValue(start),to:dateValue(today)}});
  }
  async function generate(event:FormEvent) {
   event.preventDefault();
-  if (busy || !currentProjects || currentProjects.error || (projectKeyValue && !selected)) return;
-  const controller = new AbortController();
-  request.current = controller;
-  setBusy(true);
+  if (!scope || reportInFlight.has(scope) || !currentProjects || currentProjects.error) return;
+  reportInFlight.add(scope);
+  rerender(count=>count+1);
   try {
-   const args = new URLSearchParams(projectQuery);
-   args.set('kind',kind);
-   if (selected) {
-    args.set('project',selected.projectPath);
-    args.set('location',locationKey(selected));
-   }
-   const report = await api<WorkReport>(`report?${args}`,{connectionId:connection?.id ?? ''},controller.signal);
-   if (!controller.signal.aborted) setResult(previous=>({scope,report,generation:(previous?.generation ?? 0)+1}));
+   await api<WorkReport>(`report?${scope}`,{connectionId:connection?.id ?? ''});
   } catch(err) {
-   if (!controller.signal.aborted) fail(err);
+   fail(err);
   } finally {
-   if (!controller.signal.aborted) setBusy(false);
+   reportInFlight.delete(scope);
+   notifyReportListeners(scope);
+  }
+ }
+ function editDraft(draft:WorkReport) {
+  if (!saved || savingReportDrafts.has(scope)) return;
+  updatePendingReport(scope,{draft,revision:pending?.savedRevision ?? pending?.revision ?? saved.draftRevision});
+  reportDraftErrors.delete(scope);
+  rerender(count=>count+1);
+ }
+ function discardPendingDraft() {
+  updatePendingReport(scope);
+  reportDraftErrors.delete(scope);
+  rerender(count=>count+1);
+ }
+ async function saveDraft(useGenerated:boolean) {
+  if (!saved || savingReportDrafts.has(scope) || (!useGenerated && !pending)) return;
+  reportDraftErrors.delete(scope);
+  savingReportDrafts.add(scope);
+  rerender(count=>count+1);
+  try {
+   const result = await api<{draftRevision:number}>(`report/document?${scope}`,{
+    draft:useGenerated ? null : pending?.draft,
+    draftRevision:useGenerated ? saved.draftRevision : pending?.revision,
+    reportRevision:saved.reportRevision,
+   });
+   if (useGenerated) updatePendingReport(scope);
+   else if (pending) updatePendingReport(scope,{...pending,savedRevision:result.draftRevision});
+  } catch(err) {
+   reportDraftErrors.set(scope,err instanceof Error ? err.message : String(err));
+  } finally {
+   savingReportDrafts.delete(scope);
+   notifyReportListeners(scope);
+   rerender(count=>count+1);
   }
  }
  return <><form className="settings-box report-box" onSubmit={generate}>
   <div className="report-toolbar">
    <div className="review-time">
     <div className="segments" role="group" aria-label="报告类型">{reportPresets.map(({id,label})=><button type="button" key={id} aria-pressed={kind===id} onClick={()=>selectPreset(id)}>{label}</button>)}</div>
-    <DateRangePicker range={range} active={kind==='custom'} onChange={next=>{setKind('custom');setRange(next);}}/>
+    <DateRangePicker range={range} active={kind==='custom'} onChange={next=>updateReportView({kind:'custom',range:next})}/>
    </div>
-   <label className="select report-project"><Folder size={16}/><select aria-label="报告项目" title={selected?.projectPath ?? '全部项目'} value={selected ? projectKeyValue : ''} disabled={!groups.size} onChange={event=>setProject(event.target.value)}>
+   <label className="select report-project"><Folder size={16}/><select aria-label="报告项目" title={selected?.projectPath ?? '全部项目'} value={selected ? projectKeyValue : ''} disabled={!groups.size} onChange={event=>updateReportView({projectKeyValue:event.target.value})}>
     <option value="">{!currentProjects ? '正在读取项目…' : currentProjects.error ? '项目读取失败' : groups.size ? '全部项目' : '期间无项目'}</option>
     {[...groups].sort((a,b)=>a[1].label.localeCompare(b[1].label)).map(([key,group])=><optgroup key={key} label={group.label}>
      {group.projects.map(item=><option key={projectKey(item)} value={projectKey(item)}>{item.project} · {displayPath(item.projectPath)}</option>)}
@@ -1077,15 +1249,24 @@ function Reports({listing,agentCounts,selectedAgents,onAgentsChange,profiles,onO
   <AgentPicker counts={agentCounts} selected={selectedAgents} onChange={onAgentsChange}/>
   {currentProjects?.error && <p className="feedback error" role="alert">{currentProjects.error}</p>}
   <div className="report-actions">
-   <button className="button primary" type="submit" disabled={busy || !currentProjects || !!currentProjects.error || (!!projectKeyValue && !selected)}>{busy ? <EagleMark flying/> : <FileText size={16}/>} {busy ? '正在提炼报告…' : currentReport ? '重新生成' : '生成报告'}</button>
+   <button className="button primary" type="submit" disabled={busy || !currentProjects || !!currentProjects.error || (!!projectKeyValue && !selected)}>{busy ? <EagleMark flying/> : <FileText size={16}/>} {busy ? '正在提炼报告…' : saved?.report ? '重新生成' : '生成报告'}</button>
    <span className="report-action-period muted">{rangeLabel(range)}</span>
   </div>
   {connection && <p className="report-model-note muted">生成时将期间的工作回顾摘要发送给 {connection.name}。</p>}
+  {legacyCache && <p className="report-model-note muted">检测到旧版浏览器缓存，其所属工作区无法确认。请在当前工作区重新生成报告。</p>}
  </form>
  {busy && <p role="status" className="visually-hidden">正在提炼报告</p>}
- {currentReport && <ReportDocument key={currentReport.generation} report={currentReport.report} period={rangeLabel(range)} project={selected?.project ?? ''}
-  filename={`knooo-${from}-${to}.md`} onOpen={onOpen}/>}
- {!busy && !currentReport && <Empty icon={<FileText size={22}/>} title="选择期间后生成报告"><p>可在这里阅读、编辑和导出成稿。</p></Empty>}
+ {currentResult?.error && <p className="feedback error" role="alert">{currentResult.error}
+  <button className="button text-button" type="button" onClick={()=>notifyReportListeners(scope)}>重试</button>
+ </p>}
+ {!busy && scope && !currentResult && <p className="muted" role="status">正在读取已保存的报告…</p>}
+ {saved?.report && <ReportDocument key={scope} report={saved.report} draft={pending?.draft ?? saved.draft}
+  dirty={dirty} saving={saving} canReplace={!busy && !!saved.draft}
+  error={reportDraftErrors.get(scope)} onDraftChange={editDraft}
+  onSave={()=>saveDraft(false)} onDiscard={discardPendingDraft} onReplace={()=>saveDraft(true)}
+  period={rangeLabel(range)} project={selected?.project ?? ''} filename={`knooo-${from}-${to}.md`}
+  onOpen={(id,message,version)=>onOpen(id,version ? message : undefined,'raw',version)}/>}
+ {!busy && saved && !saved.report && <Empty icon={<FileText size={22}/>} title="选择期间后生成报告"><p>可在这里阅读、编辑和导出成稿。</p></Empty>}
  </>;
 }
 

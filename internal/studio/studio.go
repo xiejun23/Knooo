@@ -54,21 +54,6 @@ type overviewItem struct {
 	Archived bool `json:"archived,omitempty"`
 }
 
-type hit struct {
-	SessionID    string        `json:"sessionId"`
-	Agent        string        `json:"agent"`
-	AgentVariant string        `json:"agentVariant,omitempty"`
-	Project      string        `json:"project"`
-	Topic        distill.Topic `json:"topic"`
-	Matches      []match       `json:"matches"`
-}
-
-type match struct {
-	SessionID string `json:"sessionId"`
-	MessageID string `json:"messageId"`
-	Snippet   string `json:"snippet"`
-}
-
 func New(reader *sessions.Store, data string, demo bool) (*app, error) {
 	path := ":memory:"
 	if !demo && data != "" {
@@ -90,6 +75,7 @@ func New(reader *sessions.Store, data string, demo bool) (*app, error) {
  CREATE TABLE IF NOT EXISTS archived_sessions (session TEXT PRIMARY KEY);
  CREATE TABLE IF NOT EXISTS reviews (session TEXT PRIMARY KEY, revision TEXT NOT NULL, content TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS review_failures (session TEXT PRIMARY KEY, revision TEXT NOT NULL, consumed INTEGER NOT NULL, message TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS report_documents (scope TEXT PRIMARY KEY, report TEXT NOT NULL, report_revision INTEGER NOT NULL DEFAULT 1, draft TEXT, draft_revision INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS platform_logs (
    id INTEGER PRIMARY KEY, time TEXT NOT NULL, area TEXT NOT NULL, level TEXT NOT NULL,
    action TEXT NOT NULL, session TEXT NOT NULL, message TEXT NOT NULL, retry_at TEXT NOT NULL
@@ -222,11 +208,14 @@ func (a *app) routes(ui http.Handler, version, changelog string) http.Handler {
 	mux.HandleFunc("POST /api/connections/discovery", a.importModelConnection)
 	mux.HandleFunc("POST /api/models", a.providerModels)
 	mux.HandleFunc("GET /api/search", a.search)
+	mux.HandleFunc("GET /api/search/matches", a.searchMatches)
 	mux.HandleFunc("GET /api/notes", a.notes)
 	mux.HandleFunc("POST /api/notes", a.saveNote)
 	mux.HandleFunc("GET /api/report", a.report)
 	mux.HandleFunc("POST /api/report", a.report)
 	mux.HandleFunc("GET /api/report/projects", a.reportProjects)
+	mux.HandleFunc("GET /api/report/document", a.savedReport)
+	mux.HandleFunc("POST /api/report/document", a.saveReportDraft)
 	mux.HandleFunc("GET /api/reviews", a.reviews)
 	mux.HandleFunc("POST /api/reviews/retry", a.retryReview)
 	mux.HandleFunc("GET /api/logs", a.platformLogs)
@@ -296,9 +285,8 @@ func (a *app) scan(w http.ResponseWriter, r *http.Request) {
 func (a *app) scanSources(sources map[string][]string, trigger string) {
 	started := time.Now()
 	records, warnings, coverage := a.reader.Scan(sources)
-	elapsed := time.Since(started)
 	slices.SortStableFunc(records, func(x, y sessions.Session) int { return compareTime(y.Updated, x.Updated) })
-	revisions := reviewRevisions(records)
+	revisions := coverage.MessageRevisions
 	a.mu.Lock()
 	previousRevisions := a.revisions
 	changed := !maps.Equal(a.revisions, revisions) || !slices.Equal(a.warnings, warnings) ||
@@ -306,6 +294,7 @@ func (a *app) scanSources(sources map[string][]string, trigger string) {
 	a.sessions, a.warnings, a.sources, a.coverage = records, warnings, sources, coverage
 	a.revisions = revisions
 	a.mu.Unlock()
+	elapsed := time.Since(started)
 
 	wasScanned := a.scanned
 	a.scanned = true
@@ -368,8 +357,8 @@ func inputs(s sessions.Session) []distill.Input {
 	return result
 }
 
-func (a *app) allTopics() (map[string][]distill.Topic, error) {
-	rows, err := a.db.Query(`SELECT session,content FROM topics`)
+func (a *app) allTopics(ctx context.Context) (map[string][]distill.Topic, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT session,content FROM topics`)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +371,7 @@ func (a *app) allTopics() (map[string][]distill.Topic, error) {
 		}
 		var topics []distill.Topic
 		if err := json.Unmarshal([]byte(content), &topics); err != nil {
-			return nil, err
+			continue
 		}
 		result[id] = topics
 	}
@@ -395,25 +384,42 @@ func (a *app) detail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "会话暂不可用，请刷新来源", 404)
 		return
 	}
-	topics, err := a.allTopics()
+	var list []distill.Topic
+	var content string
+	err := a.db.QueryRowContext(r.Context(), `SELECT content FROM topics WHERE session=?`, s.ID).Scan(&content)
+	switch {
+	case err == nil:
+		err = json.Unmarshal([]byte(content), &list)
+	case errors.Is(err, sql.ErrNoRows):
+		err = nil
+	}
 	if err != nil {
 		http.Error(w, "无法读取提炼结果", 500)
 		return
 	}
-	list := topics[s.ID]
-	if len(list) == 0 {
+	generated := len(list) > 0
+	switch {
+	case generated:
+		list = checkTopicEvidence(list, s.Messages)
+	default:
 		review, err := a.sessionReview(r.Context(), s)
 		if err != nil {
 			http.Error(w, "无法读取工作回顾", 500)
 			return
 		}
 		if review != nil {
-			jsonReply(w, map[string]any{"session": s, "topics": review, "generated": true})
-			return
+			list, generated = review, true
+		} else {
+			list = stampTopicEvidence(distill.Local(s.Title, inputs(s)), s.Messages)
 		}
-		list = distill.Local(s.Title, inputs(s))
 	}
-	jsonReply(w, map[string]any{"session": s, "topics": list, "generated": len(topics[s.ID]) > 0})
+	response := map[string]any{"session": s, "topics": list, "generated": generated}
+	if version := r.URL.Query().Get("evidenceVersion"); version != "" {
+		id := r.URL.Query().Get("anchor")
+		index := slices.IndexFunc(s.Messages, func(m sessions.Message) bool { return m.ID == id })
+		response["staleAnchor"] = index < 0 || messageEvidenceVersion(s.Messages[index]) != version
+	}
+	jsonReply(w, response)
 }
 
 func (a *app) generate(w http.ResponseWriter, r *http.Request) {
@@ -478,6 +484,7 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request) {
 	} else {
 		list = distill.Local(s.Title, messages)
 	}
+	list = stampTopicEvidence(list, s.Messages)
 	content, _ := json.Marshal(list)
 	if _, err := a.db.Exec(`INSERT INTO topics VALUES(?,?) ON CONFLICT(session) DO UPDATE SET content=excluded.content`, s.ID, string(content)); err != nil {
 		http.Error(w, "无法保存提炼结果", 500)
@@ -487,7 +494,13 @@ func (a *app) generate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) notes(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`SELECT id,session,content FROM notes ORDER BY id DESC`)
+	a.ensureSessionIndex()
+	snapshot := a.sessionsSnapshot()
+	messages := make(map[string][]sessions.Message, len(snapshot))
+	for _, s := range snapshot {
+		messages[s.ID] = s.Messages
+	}
+	rows, err := a.db.QueryContext(r.Context(), `SELECT id,session,content FROM notes ORDER BY id DESC`)
 	if err != nil {
 		http.Error(w, "无法读取知识库", 500)
 		return
@@ -501,6 +514,7 @@ func (a *app) notes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "无法读取知识条目", 500)
 			return
 		}
+		n.Topic = checkTopicEvidence([]distill.Topic{n.Topic}, messages[n.SessionID])[0]
 		items = append(items, n)
 	}
 	if rows.Err() != nil {
@@ -520,12 +534,12 @@ func (a *app) saveNote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "知识条目需要标题和原文依据", 400)
 		return
 	}
-	for _, id := range n.Topic.Evidence {
-		if !slices.ContainsFunc(s.Messages, func(m sessions.Message) bool { return m.ID == id }) {
-			http.Error(w, "原文依据已失效", 409)
-			return
-		}
+	current := stampTopicEvidence([]distill.Topic{n.Topic}, s.Messages)[0]
+	if n.Topic.EvidenceStale || !sameTopicEvidence(n.Topic, current) {
+		http.Error(w, "原文依据已失效，请重新打开会话并确认依据", 409)
+		return
 	}
+	n.Topic = current
 	content, _ := json.Marshal(n.Topic)
 	if _, err := a.db.Exec(`INSERT INTO notes(session, content) VALUES(?,?) ON CONFLICT(session, content) DO NOTHING`, n.SessionID, string(content)); err != nil {
 		http.Error(w, "无法保存知识条目", 500)
@@ -539,92 +553,3 @@ func (a *app) sessionsSnapshot() []sessions.Session {
 	defer a.mu.RUnlock()
 	return a.sessions
 }
-
-func textSnippet(text, q string) string {
-	folded := strings.ToLower(text)
-	n := strings.Index(folded, q)
-	if n < 0 {
-		return ""
-	}
-	chars := []rune(text)
-	start := max(0, len([]rune(folded[:n]))-24)
-	return strings.Join(strings.Fields(string(chars[min(start, len(chars)):min(start+128, len(chars))])), " ")
-}
-
-func (a *app) search(w http.ResponseWriter, r *http.Request) {
-	args := r.URL.Query()
-	q := strings.ToLower(strings.TrimSpace(args.Get("q")))
-	result := []hit{}
-	if q == "" {
-		jsonReply(w, result)
-		return
-	}
-	a.ensureSessionIndex()
-	saved, err := a.allTopics()
-	if err != nil {
-		http.Error(w, "无法读取提炼结果", 500)
-		return
-	}
-	archived, err := a.archivedSessions(r.Context())
-	if err != nil {
-		http.Error(w, "无法读取会话归档", 500)
-		return
-	}
-	groups := map[[7]string]int{}
-	for _, s := range a.sessionsSnapshot() {
-		if archived[s.ID] {
-			continue
-		}
-		if !inProject(s, args.Get("project"), args.Get("location")) {
-			continue
-		}
-		if !s.MatchesAgent(args["agent"]...) {
-			continue
-		}
-		matches := []match{}
-		for _, m := range s.Messages {
-			if snippet := textSnippet(m.Text, q); snippet != "" {
-				matches = append(matches, match{SessionID: s.ID, MessageID: m.ID, Snippet: snippet})
-				if len(matches) == 6 {
-					break
-				}
-			}
-		}
-		if len(matches) == 0 {
-			if !matchesSessionMetadata(s, q) {
-				continue
-			}
-			matches = append(matches, match{SessionID: s.ID})
-		}
-		t := distill.Topic{Title: s.Title, Problem: matches[0].Snippet, Status: "observed"}
-		best := 0
-		for _, candidate := range saved[s.ID] {
-			score := 0
-			for _, m := range matches {
-				if m.MessageID != "" && slices.Contains(candidate.Evidence, m.MessageID) {
-					score++
-				}
-			}
-			if score > best {
-				t, best = candidate, score
-			}
-		}
-		// shortcut: compare complete issue text exactly until we have a reliable semantic matcher.
-		key := [7]string{projectPath(s), s.Agent, normalize(t.Title), normalize(t.Problem), normalize(t.Outcome), t.Status, sessionLocation(s)}
-		if best > 0 && key[2] != "" && key[3] != "" && key[0] != "" {
-			if index, ok := groups[key]; ok {
-				existing := &result[index]
-				existing.Matches = append(existing.Matches, matches...)
-				continue
-			}
-			groups[key] = len(result)
-		}
-		if len(result) >= 100 {
-			break
-		}
-		result = append(result, hit{SessionID: s.ID, Agent: s.Agent, AgentVariant: s.AgentVariant, Project: s.Project, Topic: t, Matches: matches})
-	}
-	jsonReply(w, result)
-}
-
-func normalize(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }

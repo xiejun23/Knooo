@@ -509,3 +509,83 @@ func TestAutomaticReviewLookbackWindowAndManualRetry(t *testing.T) {
 		}
 	}
 }
+
+func TestManualReviewKeepsPublishedTopicsUntilReplacementFinishes(t *testing.T) {
+	item := reviewTestSession()
+	item.Messages = append(item.Messages, sessions.Message{
+		ID: "next-user", Role: "user", Timestamp: item.Updated, Text: "请继续检查缓存索引。",
+	})
+	published := distill.Topic{Title: "旧版回顾", Problem: "现有检查结果", Status: "open", Evidence: []string{"old-user"}}
+	first := distill.Topic{Title: "支付回调", Problem: "核对回调处理", Status: "open", Evidence: []string{"old-user"}}
+	next := distill.Topic{Title: "缓存索引", Problem: "核对缓存索引", Status: "open", Evidence: []string{"next-user"}}
+	gateway, calls := reviewTestGateway(t, []reviewTestBatch{
+		{ids: []string{"old-user", "old-answer"}, topics: []distill.Topic{first}},
+		{ids: []string{"next-user"}, status: http.StatusServiceUnavailable},
+		{ids: []string{"next-user"}, topics: []distill.Topic{next}},
+	})
+	data := t.TempDir()
+	a := openReviewTestApp(t, data, item)
+	profile := configureReviewTest(t, a, gateway)
+	insertLegacyReview(t, a, item, []distill.Topic{published})
+	a.review.wake = make(chan struct{}, 1)
+	reviewTestRequest(t, a, "POST", "/api/reviews/retry", `{"id":"`+item.ID+`"}`)
+	if entry := readReviewTestEntry(t, a); entry.State != "queued" || len(entry.Topics) != 1 || entry.Topics[0].Title != published.Title {
+		t.Fatalf("expected queued replacement and retained published topic: %+v", entry)
+	}
+
+	a.processReviews(context.Background(), false)
+	if entry := readReviewTestEntry(t, a); entry.State != "error" || len(entry.Topics) != 1 || entry.Topics[0].Title != published.Title {
+		t.Fatalf("expected original publication after partial failure: %+v", entry)
+	}
+	if raw := reviewTestRequest(t, a, "GET", "/api/report?"+reviewTestWindow, ""); !strings.Contains(raw, published.Problem) || strings.Contains(raw, first.Problem) {
+		t.Fatalf("report should continue using the published review: %s", raw)
+	}
+
+	setReviewTestModel(t, a, "")
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openReviewTestApp(t, data, item)
+	setReviewTestModel(t, reopened, profile.ID)
+	reopened.processReviews(context.Background(), false)
+	entry := readReviewTestEntry(t, reopened)
+	if calls.Load() != 3 || entry.State != "ready" || len(entry.Topics) != 2 ||
+		entry.Topics[0].Title != first.Title || entry.Topics[1].Title != next.Title {
+		t.Fatalf("expected resumed replacement to publish atomically: calls=%d, entry=%+v", calls.Load(), entry)
+	}
+}
+
+func TestAutomaticReviewWaitsForRepairedWindow(t *testing.T) {
+	item := reviewTestSession()
+	item.Updated = time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+	a := openReviewTestApp(t, t.TempDir(), item)
+	gateway, calls := reviewTestGateway(t, []reviewTestBatch{{
+		ids:    []string{"old-user", "old-answer"},
+		topics: []distill.Topic{{Title: "支付回调", Problem: "核对处理结果", Status: "open", Evidence: []string{"old-user"}}},
+	}})
+	profile := configureReviewTest(t, a, gateway)
+	if _, err := a.db.Exec(`INSERT INTO settings VALUES('review_window_days','corrupt')`); err != nil {
+		t.Fatal(err)
+	}
+	var settings struct {
+		ConnectionID  string
+		MaxAgeDays    *int
+		SettingsError string
+	}
+	if body := reviewTestRequest(t, a, "GET", "/api/review-settings", ""); json.Unmarshal([]byte(body), &settings) != nil ||
+		settings.ConnectionID != profile.ID || settings.MaxAgeDays != nil || settings.SettingsError == "" {
+		t.Fatalf("settings page must be able to repair the invalid window: %s", body)
+	}
+	ctx := context.Background()
+	a.processReviews(ctx, false)
+	if calls.Load() != 0 || !a.review.settingsError {
+		t.Fatal("invalid review window must pause processing")
+	}
+	a.review.wake = make(chan struct{}, 1)
+	reviewTestRequest(t, a, "POST", "/api/review-settings", `{"connectionId":"`+profile.ID+`","maxAgeDays":7}`)
+	a.processReviews(ctx, false)
+	reviews, err := a.readReviews(ctx)
+	if err != nil || calls.Load() != 1 || reviews[item.ID].Consumed != len(item.Messages) {
+		t.Fatal("saving a valid window must resume processing")
+	}
+}

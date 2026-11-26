@@ -70,12 +70,9 @@ func SynthesizeReport(ctx context.Context, config Config, model Model, focus str
 		return ReportSynthesis{}, err
 	}
 	input, output = min(input, DefaultInputBudget), min(output, DefaultOutputBudget)
-	if model.MaxOutputTokens > 0 {
-		output = min(output, model.MaxOutputTokens)
-	}
-	if model.ContextWindow > 0 {
-		output = min(output, max(1, model.ContextWindow-MinInputBudget))
-		input = min(input, model.ContextWindow-output)
+	input, output, err = fitBudgets(config, model, input, output)
+	if err != nil {
+		return ReportSynthesis{}, err
 	}
 	prompt := fmt.Sprintf("%s\n%s 优先选 3 到 %d 条有实质内容的结果，证据少时可以更少，总数最多 %d 条。", reportInstructions, focus, maxItems, maxItems)
 	limit := input - len(prompt) - 130

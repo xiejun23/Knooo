@@ -57,8 +57,49 @@ jobs:
             build/release-notes.md
           if-no-files-found: error
 
-  publish:
+  smoke-windows:
     needs: build
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: windows-x64
+      - name: Verify installation and in-place update
+        shell: pwsh
+        run: |
+          $setup = Join-Path $PWD 'Knooo-Setup-windows-x64.exe'
+          $target = Join-Path $env:RUNNER_TEMP 'KnoooSmoke'
+          $installed = Join-Path $target 'Knooo-Studio.exe'
+          $expected = (Get-FileHash 'Knooo-windows-x64.exe').Hash
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KnoooStudio'
+
+          $install = Start-Process -FilePath $setup -ArgumentList "/S /D=$target" -PassThru -Wait
+          if ($install.ExitCode -ne 0 -or (Get-FileHash $installed).Hash -ne $expected) {
+            throw 'Installed binary did not match the release artifact'
+          }
+          if ((Get-ItemProperty $key).InstallLocation -ne $target) {
+            throw 'Installer did not register its installation directory'
+          }
+
+          Add-Content -LiteralPath $installed -Value 'previous installation marker'
+          $exiting = Start-Process -FilePath (Get-Command pwsh).Source `
+            -ArgumentList '-NoProfile -Command "Start-Sleep -Seconds 5"' -PassThru
+          $upgrade = Start-Process -FilePath $setup -ArgumentList "/S /UPDATEPID=$($exiting.Id)" -PassThru
+          if (!$upgrade.WaitForExit(60000) -or $upgrade.ExitCode -ne 0 -or (Get-FileHash $installed).Hash -ne $expected) {
+            throw 'The in-place update did not restore the release binary'
+          }
+          $deadline = (Get-Date).AddSeconds(15)
+          do {
+            $app = Get-Process -Name 'Knooo-Studio' -ErrorAction SilentlyContinue |
+              Where-Object { $_.Path -eq $installed }
+            if (!$app) { Start-Sleep -Milliseconds 250 }
+          } until ($app -or (Get-Date) -ge $deadline)
+          if (!$app) { throw 'Knooo did not restart after the in-place update' }
+          $app | Stop-Process
+
+  publish:
+    needs: smoke-windows
     runs-on: ubuntu-24.04
     permissions:
       contents: write

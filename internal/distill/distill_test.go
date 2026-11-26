@@ -6,9 +6,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -382,6 +385,56 @@ func TestReviewBoundaryContextAndConciseValidation(t *testing.T) {
 		Status: "open", Evidence: []string{"m1"},
 	}, []Input{{ID: "m1", Role: "user", Text: longRaw}}); err == nil {
 		t.Fatal("expected long verbatim dump (>= 80 runes) to still be rejected")
+	}
+}
+
+func TestReviewKeepsNewMessagesWhenResumingWithSmallBudget(t *testing.T) {
+	messages := []Input{
+		{ID: "u1", Role: "user", Text: "核对上一次缓存修改。"},
+		{ID: "a1", Role: "assistant", Text: strings.Repeat("已完成缓存回归。", 15)},
+		{ID: "u2", Role: "user", Text: strings.Repeat("请继续检查索引。", 20)},
+		{ID: "a2", Role: "assistant", Text: strings.Repeat("已核对索引覆盖范围。", 20)},
+		{ID: "u3", Role: "user", Text: "复核排序字段。"},
+	}
+	want := [][]string{{"u2", "a2"}, {"u3"}}
+	const budget = 4096
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Messages []struct{ Content string } }
+		var batch []Input
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Messages) != 2 ||
+			json.Unmarshal([]byte(body.Messages[1].Content), &batch) != nil ||
+			len(body.Messages[0].Content)+len(body.Messages[1].Content)+128 > budget {
+			t.Error("expected a batch that fits the configured budget")
+			http.Error(w, "invalid batch", http.StatusBadRequest)
+			return
+		}
+		var ids []string
+		for _, message := range batch {
+			ids = append(ids, message.ID)
+		}
+		if len(want) == 0 || !slices.Equal(ids, want[0]) {
+			t.Errorf("unexpected review batch: %v", ids)
+			http.Error(w, "unexpected batch", http.StatusBadRequest)
+			return
+		}
+		want = want[1:]
+		io.WriteString(w, `{"choices":[{"message":{"content":"{\"topics\":[]}"}}]}`)
+	}))
+	defer gateway.Close()
+	config := Config{Provider: "gateway", Model: "review-test", BaseURL: gateway.URL + "/v1", InputBudget: budget, OutputBudget: 256}
+	topics := []Topic{{Title: "缓存检查", Problem: "核对修改", Evidence: []string{"u1", "a1"}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var checkpoints []int
+	err := Review(ctx, config, Model{}, messages, 3, topics, func(consumed int, got []Topic) error {
+		checkpoints = append(checkpoints, consumed)
+		if len(got) != 1 || got[0].Title != topics[0].Title {
+			t.Fatalf("expected saved topics to carry forward: %+v", got)
+		}
+		return nil
+	})
+	if err != nil || !slices.Equal(checkpoints, []int{4, 5}) {
+		t.Fatalf("checkpoints=%v, err=%v", checkpoints, err)
 	}
 }
 

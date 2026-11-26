@@ -150,8 +150,14 @@ func TestDiskCachePersistsAcrossRestartsAndInvalidates(t *testing.T) {
 	if len(initial) != 1 {
 		t.Fatalf("expected 1 session, got %d", len(initial))
 	}
-	if _, err := os.Stat(cacheFile); err != nil {
-		t.Fatalf("expected disk cache file to be written: %v", err)
+	earlier := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(cacheFile, earlier, earlier); err != nil {
+		t.Fatal(err)
+	}
+	original := cacheFileInfo(t, cacheFile)
+	scanClean(t, store, nil)
+	if current := cacheFileInfo(t, cacheFile); !os.SameFile(original, current) || !original.ModTime().Equal(current.ModTime()) {
+		t.Fatal("unchanged warm scan rewrote the disk cache")
 	}
 
 	// Cold restart into a fresh Store should reuse the persisted disk cache.
@@ -161,8 +167,8 @@ func TestDiskCachePersistsAcrossRestartsAndInvalidates(t *testing.T) {
 	if !reflect.DeepEqual(initial, reloaded) {
 		t.Fatalf("cold disk-cache reload mismatch:\ngot:  %#v\nwant: %#v", reloaded, initial)
 	}
-	if len(cold.disk) != 1 {
-		t.Fatalf("expected 1 entry in cold disk cache, got %d", len(cold.disk))
+	if current := cacheFileInfo(t, cacheFile); !os.SameFile(original, current) || !original.ModTime().Equal(current.ModTime()) {
+		t.Fatal("unchanged cold scan rewrote the disk cache")
 	}
 
 	// Appending to the source file must invalidate the cached entry and update the disk cache.
@@ -179,4 +185,46 @@ func TestDiskCachePersistsAcrossRestartsAndInvalidates(t *testing.T) {
 	if !reflect.DeepEqual(updated, reloadedUpdated) {
 		t.Fatalf("second cold reload did not reflect updated disk cache")
 	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if items := scanClean(t, coldAfterUpdate, nil); len(items) != 0 {
+		t.Fatalf("removed session remains in scan: %+v", items)
+	}
+	reloadedEmpty := New(home)
+	reloadedEmpty.SetCachePath(cacheFile)
+	reloadedEmpty.ensureDiskCacheLoaded()
+	if len(reloadedEmpty.disk) != 0 {
+		t.Fatalf("removed session remains in disk cache: %+v", reloadedEmpty.disk)
+	}
+}
+
+func TestDiskCacheRetriesFailedWrite(t *testing.T) {
+	store, home := isolatedStore(t)
+	cacheFile := filepath.Join(t.TempDir(), "cache.zst")
+	if err := os.Mkdir(cacheFile, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store.SetCachePath(cacheFile)
+	putFile(t, filepath.Join(home, ".codex", "sessions", "rollout-write-retry.jsonl"), []byte(
+		`{"type":"session_meta","payload":{"id":"write-retry"}}`+"\n"+
+			`{"type":"event_msg","payload":{"type":"user_message","message":"First cached turn."}}`+"\n"))
+	scanClean(t, store, nil)
+	if err := os.Remove(cacheFile); err != nil {
+		t.Fatal(err)
+	}
+	scanClean(t, store, nil)
+	if info := cacheFileInfo(t, cacheFile); !info.Mode().IsRegular() {
+		t.Fatal("cache write was not retried")
+	}
+}
+
+func cacheFileInfo(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
 }

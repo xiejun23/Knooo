@@ -33,6 +33,8 @@ type cachedFile struct {
 	badRows  int
 	badLines int
 	parsed   candidate
+
+	messageRevision string
 }
 
 func (src source) refresh(old *cachedFile) (*cachedFile, error) {

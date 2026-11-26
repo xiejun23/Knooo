@@ -19,6 +19,7 @@ function buildPageTokens(current: number, totalPages: number): PageToken[] {
 }
 
 export function Pagination({
+ label = '日志分页',
  page,
  pageSize,
  total,
@@ -27,6 +28,7 @@ export function Pagination({
  onPageChange,
  onPageSizeChange,
 }: {
+ label?: string;
  page: number;
  pageSize: number;
  total: number;
@@ -42,7 +44,7 @@ export function Pagination({
  const endItem = Math.min(total, safePage * pageSize);
  const tokens = buildPageTokens(safePage, totalPages);
 
- return <nav className="pagination" aria-label="日志分页">
+ return <nav className="pagination" aria-label={label}>
   <div className="pagination-summary">
    <span>第 {startItem}–{endItem} 条，共 {total} 条</span>
    {onPageSizeChange && <label className="pagination-size">

@@ -33,7 +33,7 @@ func (a *app) unlockModelKey(profile modelConnection, config distill.Config, sec
 	return string(key)
 }
 
-func (a *app) writeModelConnection(profile modelConnection, secret []byte, remove bool) error {
+func (a *app) writeModelConnection(profile modelConnection, secret []byte, remove, keepKey bool) error {
 	tx, err := a.db.Begin()
 	if err != nil {
 		return err
@@ -47,6 +47,9 @@ func (a *app) writeModelConnection(profile modelConnection, secret []byte, remov
 	}
 	if err != nil {
 		return err
+	}
+	if keepKey {
+		return tx.Commit()
 	}
 	if len(secret) == 0 {
 		_, err = tx.Exec(`DELETE FROM model_keys WHERE id=?`, profile.ID)

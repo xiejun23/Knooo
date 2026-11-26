@@ -2,9 +2,8 @@ package studio
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +25,7 @@ const reviewConcurrency = 3
 const reviewResponseAttempts = 3
 
 var errReviewChanged = errors.New("review checkpoint changed")
+var errReviewWindowInvalid = errors.New("自动回顾范围无效，请在本机设置中重新保存")
 
 type reviewWorker struct {
 	sync.Mutex
@@ -37,7 +37,6 @@ type reviewWorker struct {
 	message       string
 	settingsError bool
 	rejected      map[string]reviewIssue
-	manual        map[string]bool
 }
 
 type reviewIssue struct {
@@ -97,6 +96,14 @@ type storedReview struct {
 type reviewCheckpoint struct {
 	Consumed int             `json:"consumed"`
 	Topics   []distill.Topic `json:"topics"`
+	Retry    *reviewRetry    `json:"retry,omitempty"`
+}
+
+type reviewRetry struct {
+	Token    string          `json:"token"`
+	Revision string          `json:"revision,omitempty"`
+	Consumed int             `json:"consumed"`
+	Topics   []distill.Topic `json:"topics"`
 }
 
 func (review *storedReview) decode(raw string) error {
@@ -140,10 +147,7 @@ func reviewRevisions(items []sessions.Session) map[string]string {
 }
 
 func reviewRevision(messages []sessions.Message) string {
-	hash := sha256.New()
-	hash.Write([]byte("review-v1\n"))
-	_ = json.NewEncoder(hash).Encode(messages)
-	return hex.EncodeToString(hash.Sum(nil))
+	return sessions.MessageRevision(messages)
 }
 
 func (a *app) reviewSnapshot() ([]sessions.Session, map[string]string) {
@@ -161,29 +165,36 @@ func (a *app) reviewModel() (string, error) {
 	return id, err
 }
 
-func (a *app) reviewWindowDays() (int, error) {
-	var raw string
-	err := a.db.QueryRow(`SELECT content FROM settings WHERE name='review_window_days'`).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
+const reviewSettingsQuery = `SELECT
+	COALESCE((SELECT content FROM settings WHERE name='review_model'), ''),
+	COALESCE((SELECT content FROM settings WHERE name='review_window_days'), '0')`
+
+func parseReviewWindowDays(raw string) (int, error) {
 	days, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || days < 0 {
-		return 0, nil
+	if err == nil {
+		switch days {
+		case 0, 7, 30, 90:
+			return days, nil
+		}
 	}
-	return days, nil
+	return 0, errReviewWindowInvalid
 }
 
-func (a *app) getReviewModel(w http.ResponseWriter, _ *http.Request) {
-	id, err := a.reviewModel()
-	if err != nil {
-		http.Error(w, "无法读取自动工作回顾设置", http.StatusInternalServerError)
+func (a *app) reviewSettings(ctx context.Context) (string, int, error) {
+	var id, raw string
+	if err := a.db.QueryRowContext(ctx, reviewSettingsQuery).Scan(&id, &raw); err != nil {
+		return "", 0, err
+	}
+	days, err := parseReviewWindowDays(raw)
+	return id, days, err
+}
+
+func (a *app) getReviewModel(w http.ResponseWriter, r *http.Request) {
+	id, days, err := a.reviewSettings(r.Context())
+	if errors.Is(err, errReviewWindowInvalid) {
+		jsonReply(w, map[string]any{"connectionId": id, "settingsError": err.Error()})
 		return
 	}
-	days, err := a.reviewWindowDays()
 	if err != nil {
 		http.Error(w, "无法读取自动工作回顾设置", http.StatusInternalServerError)
 		return
@@ -215,7 +226,7 @@ func (a *app) setReviewModel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	days, _ := a.reviewWindowDays()
+	days := 0
 	if body.MaxAgeDays != nil {
 		switch *body.MaxAgeDays {
 		case 0, 7, 30, 90:
@@ -224,19 +235,42 @@ func (a *app) setReviewModel(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "自动提炼范围无效", http.StatusBadRequest)
 			return
 		}
-		if _, err := a.db.ExecContext(r.Context(), `INSERT INTO settings VALUES('review_window_days',?) ON CONFLICT(name) DO UPDATE SET content=excluded.content`, strconv.Itoa(days)); err != nil {
-			http.Error(w, "无法保存自动工作回顾设置", http.StatusInternalServerError)
+	}
+	ctx := r.Context()
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		http.Error(w, "无法保存自动工作回顾设置", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+	var previousID, rawDays string
+	if err := tx.QueryRowContext(ctx, reviewSettingsQuery).Scan(&previousID, &rawDays); err != nil {
+		http.Error(w, "无法读取自动工作回顾设置", http.StatusInternalServerError)
+		return
+	}
+	if body.MaxAgeDays == nil {
+		days, err = parseReviewWindowDays(rawDays)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
-	previousID, _ := a.reviewModel()
-	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO settings VALUES('review_model',?) ON CONFLICT(name) DO UPDATE SET content=excluded.content`, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings VALUES('review_model',?),('review_window_days',?)
+		ON CONFLICT(name) DO UPDATE SET content=excluded.content`, id, strconv.Itoa(days)); err != nil {
 		http.Error(w, "无法保存自动工作回顾设置", http.StatusInternalServerError)
 		return
 	}
 	if id != "" && id != previousID {
-		a.clearAllReviewFailures(r.Context())
+		if _, err := tx.ExecContext(ctx, `DELETE FROM review_failures`); err != nil {
+			http.Error(w, "无法保存自动工作回顾设置", http.StatusInternalServerError)
+			return
+		}
 	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "无法保存自动工作回顾设置", http.StatusInternalServerError)
+		return
+	}
+	a.wakeReview(true)
 	if id != previousID {
 		a.keys.Lock()
 		prevProfile, prevFound := a.loadSavedModelConnection(previousID)
@@ -265,7 +299,6 @@ func (a *app) setReviewModel(w http.ResponseWriter, r *http.Request) {
 			Message: fmt.Sprintf("当前设置：%s（原：%s）", formatTarget(nextProfile, nextFound, id), formatTarget(prevProfile, prevFound, previousID)),
 		})
 	}
-	a.wakeReview(true)
 	if id != "" {
 		a.startReview()
 	}
@@ -283,27 +316,72 @@ func (a *app) retryReview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无法重新提炼该会话", http.StatusBadRequest)
 		return
 	}
-	id, err := a.reviewModel()
-	if err != nil || id == "" {
+	id, _, err := a.reviewSettings(r.Context())
+	if err != nil {
+		http.Error(w, "无法读取自动工作回顾设置", http.StatusInternalServerError)
+		return
+	}
+	if id == "" {
 		http.Error(w, "请先在「本机设置」中选择自动工作回顾的默认算力提供商", http.StatusBadRequest)
 		return
 	}
-	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM reviews WHERE session=?`, body.ID); err != nil {
+	a.ensureSessionIndex()
+	session, found := a.session(body.ID)
+	if !found {
+		http.Error(w, "会话不存在", http.StatusNotFound)
+		return
+	}
+	if len(session.Messages) == 0 {
+		http.Error(w, "会话没有可重新提炼的消息", http.StatusBadRequest)
+		return
+	}
+	a.review.Lock()
+	err = a.queueReviewRetry(r.Context(), body.ID)
+	if err != nil {
+		a.review.Unlock()
 		http.Error(w, "无法重置会话回顾状态", http.StatusInternalServerError)
 		return
 	}
-	a.clearReviewFailure(r.Context(), body.ID)
-	a.review.Lock()
-	delete(a.review.rejected, body.ID)
-	if a.review.manual == nil {
-		a.review.manual = make(map[string]bool)
+	if a.review.cancelRun != nil {
+		a.review.cancelRun()
 	}
-	a.review.manual[body.ID] = true
+	delete(a.review.rejected, body.ID)
 	a.review.message = ""
 	a.review.Unlock()
 	a.startReview()
 	a.wakeReview(false)
 	jsonReply(w, map[string]bool{"ok": true})
+}
+
+func (a *app) queueReviewRetry(ctx context.Context, id string) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var previous storedReview
+	var raw string
+	err = tx.QueryRowContext(ctx, `SELECT revision,content FROM reviews WHERE session=?`, id).Scan(&previous.revision, &raw)
+	if err == nil {
+		if err := previous.decode(raw); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	checkpoint := previous.reviewCheckpoint
+	checkpoint.Retry = &reviewRetry{Token: rand.Text()}
+	revision := previous.revision
+	if revision == "" {
+		revision = reviewRevision(nil)
+	}
+	if _, err := writeReview(ctx, tx, id, revision, checkpoint, previous); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM review_failures WHERE session=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (a *app) startReview() {
@@ -373,8 +451,12 @@ func (a *app) runReviews(ctx context.Context, wake <-chan struct{}, done chan<- 
 }
 
 func (a *app) processReviews(ctx context.Context, scan bool) {
-	id, err := a.reviewModel()
-	if err != nil || id == "" || ctx.Err() != nil {
+	id, maxAgeDays, err := a.reviewSettings(ctx)
+	if err != nil {
+		a.reviewFailure(ctx, "无法读取自动工作回顾设置，请在本机设置中重新保存", true)
+		return
+	}
+	if id == "" || ctx.Err() != nil {
 		return
 	}
 	config, err := a.connectionConfig(id)
@@ -407,21 +489,24 @@ func (a *app) processReviews(ctx context.Context, scan bool) {
 	if err != nil {
 		persistedFailures = nil
 	}
-	maxAgeDays, _ := a.reviewWindowDays()
 	now := time.Now()
 	items, revisions := a.reviewSnapshot()
-	a.review.Lock()
-	manualQueue := maps.Clone(a.review.manual)
-	a.review.Unlock()
-	if len(manualQueue) > 0 {
+	hasRetry := false
+	for _, checkpoint := range cached {
+		if checkpoint.Retry != nil {
+			hasRetry = true
+			break
+		}
+	}
+	if hasRetry {
 		ordered := make([]sessions.Session, 0, len(items))
 		for _, item := range items {
-			if manualQueue[item.ID] {
+			if cached[item.ID].Retry != nil {
 				ordered = append(ordered, item)
 			}
 		}
 		for _, item := range items {
-			if !manualQueue[item.ID] {
+			if cached[item.ID].Retry == nil {
 				ordered = append(ordered, item)
 			}
 		}
@@ -450,7 +535,11 @@ func (a *app) processReviews(ctx context.Context, scan bool) {
 			}
 			previous := cached[item.ID]
 			checkpoint, valid := previous.verified(item.Messages, revision)
-			if valid && checkpoint.Consumed == len(item.Messages) {
+			retry := previous.Retry
+			if retry != nil {
+				progress := storedReview{revision: retry.Revision, reviewCheckpoint: reviewCheckpoint{Consumed: retry.Consumed, Topics: retry.Topics}}
+				checkpoint, _ = progress.verified(item.Messages, revision)
+			} else if valid && checkpoint.Consumed == len(item.Messages) {
 				if previous.Consumed == -1 {
 					if _, err := a.saveReview(ctx, item.ID, revision, checkpoint, previous); err != nil && !errors.Is(err, errReviewChanged) {
 						a.reviewFailure(ctx, "无法保存工作回顾进度", false)
@@ -463,20 +552,18 @@ func (a *app) processReviews(ctx context.Context, scan bool) {
 			if len(item.Messages) == 0 {
 				continue
 			}
-			isManual := manualQueue[item.ID]
+			isManual := retry != nil
 			if !isManual && a.reviewCoolingDown(item, now) {
 				continue
 			}
 			if !isManual && reviewOutsideWindow(item, maxAgeDays, now) {
 				continue
 			}
-			if !isManual {
-				if failure, ok := persistedFailures[item.ID]; ok && failure.revision == revision {
-					continue
-				}
+			if failure, ok := persistedFailures[item.ID]; ok && failure.revision == revision {
+				continue
 			}
 			a.review.Lock()
-			rejected := !isManual && a.review.rejected[item.ID].blocks(revision, time.Now())
+			rejected := a.review.rejected[item.ID].blocks(revision, time.Now())
 			a.review.Unlock()
 			if rejected {
 				continue
@@ -497,8 +584,15 @@ func (a *app) processReviews(ctx context.Context, scan bool) {
 					if consumed < len(item.Messages) {
 						prefix = reviewRevision(item.Messages[:consumed])
 					}
+					next := reviewCheckpoint{Consumed: consumed, Topics: topics}
+					if retry != nil && consumed < len(item.Messages) {
+						// Keep the existing review visible until the full replacement succeeds.
+						staged := previous.reviewCheckpoint
+						staged.Retry = &reviewRetry{Token: retry.Token, Revision: prefix, Consumed: consumed, Topics: topics}
+						prefix, next = previous.revision, staged
+					}
 					var err error
-					previous, err = a.saveReview(ctx, item.ID, prefix, reviewCheckpoint{Consumed: consumed, Topics: topics}, previous)
+					previous, err = a.saveReview(ctx, item.ID, prefix, next, previous)
 					if err != nil && !errors.Is(err, errReviewChanged) {
 						return errors.New("无法保存工作回顾进度")
 					}
@@ -519,7 +613,6 @@ func (a *app) processReviews(ctx context.Context, scan bool) {
 		var clearFailure bool
 		a.review.Lock()
 		delete(running, result.id)
-		delete(a.review.manual, result.id)
 		if ctx.Err() == nil {
 			switch {
 			case errors.Is(err, errReviewChanged):
@@ -592,15 +685,21 @@ func (a *app) reviewFailure(ctx context.Context, message string, settings bool) 
 }
 
 func (a *app) saveReview(ctx context.Context, id, revision string, checkpoint reviewCheckpoint, previous storedReview) (storedReview, error) {
+	return writeReview(ctx, a.db, id, revision, checkpoint, previous)
+}
+
+func writeReview(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, id, revision string, checkpoint reviewCheckpoint, previous storedReview) (storedReview, error) {
 	raw, err := json.Marshal(checkpoint)
 	if err != nil {
 		return storedReview{}, err
 	}
 	var result sql.Result
 	if previous.revision == "" {
-		result, err = a.db.ExecContext(ctx, `INSERT INTO reviews(session,revision,content) VALUES(?,?,?) ON CONFLICT(session) DO NOTHING`, id, revision, string(raw))
+		result, err = db.ExecContext(ctx, `INSERT INTO reviews(session,revision,content) VALUES(?,?,?) ON CONFLICT(session) DO NOTHING`, id, revision, string(raw))
 	} else {
-		result, err = a.db.ExecContext(ctx, `UPDATE reviews SET revision=?,content=? WHERE session=? AND revision=? AND content=?`,
+		result, err = db.ExecContext(ctx, `UPDATE reviews SET revision=?,content=? WHERE session=? AND revision=? AND content=?`,
 			revision, string(raw), id, previous.revision, previous.raw)
 	}
 	if err != nil {
@@ -654,7 +753,7 @@ func (a *app) sessionReview(ctx context.Context, s sessions.Session) ([]distill.
 	if !valid || checkpoint.Consumed < len(s.Messages) && len(checkpoint.Topics) == 0 {
 		return nil, nil
 	}
-	return publicReviewTopics(checkpoint.Topics), nil
+	return stampTopicEvidence(publicReviewTopics(checkpoint.Topics), s.Messages), nil
 }
 
 func publicReviewTopics(topics []distill.Topic) []distill.Topic {
@@ -743,10 +842,6 @@ func (a *app) clearReviewFailure(ctx context.Context, sessionID string) {
 	_, _ = a.db.ExecContext(ctx, `DELETE FROM review_failures WHERE session=?`, sessionID)
 }
 
-func (a *app) clearAllReviewFailures(ctx context.Context) {
-	_, _ = a.db.ExecContext(ctx, `DELETE FROM review_failures`)
-}
-
 func (a *app) readReviewsFor(ctx context.Context, ids []string) (map[string]storedReview, error) {
 	result := make(map[string]storedReview, len(ids))
 	if len(ids) == 0 {
@@ -799,12 +894,7 @@ func reviewOutsideWindow(item sessions.Session, maxAgeDays int, now time.Time) b
 }
 
 func (a *app) reviews(w http.ResponseWriter, r *http.Request) {
-	id, err := a.reviewModel()
-	if err != nil {
-		http.Error(w, "无法读取自动工作回顾设置", http.StatusInternalServerError)
-		return
-	}
-	maxAgeDays, _ := a.reviewWindowDays()
+	id, maxAgeDays, settingsErr := a.reviewSettings(r.Context())
 	result := struct {
 		ConnectionID  string        `json:"connectionId"`
 		Error         string        `json:"error,omitempty"`
@@ -845,23 +935,29 @@ func (a *app) reviews(w http.ResponseWriter, r *http.Request) {
 	result.SettingsError = a.review.settingsError
 	running := maps.Clone(a.review.running)
 	rejected := maps.Clone(a.review.rejected)
-	manualQueue := maps.Clone(a.review.manual)
 	a.review.Unlock()
+	if settingsErr != nil {
+		message = "无法读取自动工作回顾设置，请在本机设置中重新保存"
+		result.SettingsError = true
+	}
 	result.Error = message
 	for _, item := range scoped {
 		revision := revisions[item.ID]
-		checkpoint, valid := cached[item.ID].verified(item.Messages, revision)
-		entry := reviewEntry{State: "queued", Topics: publicReviewTopics(checkpoint.Topics)}
+		previous := cached[item.ID]
+		checkpoint, valid := previous.verified(item.Messages, revision)
+		entry := reviewEntry{State: "queued", Topics: stampTopicEvidence(publicReviewTopics(checkpoint.Topics), item.Messages)}
 		persisted := persistedFailures[item.ID]
-		isManual := manualQueue[item.ID]
+		isManual := previous.Retry != nil
 		switch {
-		case len(item.Messages) == 0 || valid && checkpoint.Consumed == len(item.Messages):
+		case len(item.Messages) == 0 || !isManual && valid && checkpoint.Consumed == len(item.Messages):
 			entry.State = "ready"
+		case settingsErr != nil:
+			entry.State = "error"
 		case id == "":
 			entry.State = "disabled"
 		case running[item.ID] == revision:
 			entry.State = "running"
-		case !isManual && (message != "" || rejected[item.ID].revision == revision || persisted.revision == revision):
+		case message != "" || rejected[item.ID].revision == revision || persisted.revision == revision:
 			entry.State = "error"
 		case !isManual && a.reviewCoolingDown(item, now):
 			entry.State = "cooldown"

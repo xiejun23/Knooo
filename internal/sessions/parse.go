@@ -124,8 +124,8 @@ func parseRecord(agent string, line []byte, number int) (record, bool) {
 				role, text = "assistant", contentText(p.Message)
 			}
 		}
-		if role == "user" && codexContext(text) {
-			text = ""
+		if role == "user" {
+			text = stripCodexContext(text)
 		}
 	case "claude":
 		r.id, r.cwd = e.SessionID, e.Cwd
@@ -269,12 +269,34 @@ func filteredContentText(raw json.RawMessage, keep func(string) bool) string {
 	return strings.Join(words, "\n")
 }
 
-func codexContext(text string) bool {
+func stripCodexContext(text string) string {
 	text = strings.TrimSpace(text)
-	return strings.HasPrefix(text, "# AGENTS.md") ||
-		strings.HasPrefix(text, "<environment_context>") ||
-		strings.HasPrefix(text, "<user_instructions>") ||
-		strings.HasPrefix(text, "<permissions instructions>")
+	for {
+		body := text
+		var closeTag string
+		switch {
+		case strings.HasPrefix(text, "# AGENTS.md instructions for "):
+			_, afterHeading, _ := strings.Cut(text, "\n")
+			body = strings.TrimSpace(afterHeading)
+			if !strings.HasPrefix(body, "<INSTRUCTIONS>") {
+				return text
+			}
+			closeTag = "</INSTRUCTIONS>"
+		case strings.HasPrefix(text, "<environment_context>"):
+			closeTag = "</environment_context>"
+		case strings.HasPrefix(text, "<user_instructions>"):
+			closeTag = "</user_instructions>"
+		case strings.HasPrefix(text, "<permissions instructions>"):
+			closeTag = "</permissions instructions>"
+		default:
+			return text
+		}
+		_, remaining, found := strings.Cut(body, closeTag)
+		if !found {
+			return text
+		}
+		text = strings.TrimSpace(remaining)
+	}
 }
 
 func parseTime(raw json.RawMessage) time.Time {

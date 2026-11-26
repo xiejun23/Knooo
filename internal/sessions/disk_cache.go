@@ -9,7 +9,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-const sessionCacheVersion = 1
+const sessionCacheVersion = 2
 
 type diskCachePayload struct {
 	Version int
@@ -37,6 +37,8 @@ func (s *Store) SetCachePath(path string) {
 	s.cachePath = path
 	s.diskLoaded = false
 	s.disk = nil
+	s.diskSize = 0
+	s.diskDirty = len(s.files) > 0
 }
 
 func (s *Store) ensureDiskCacheLoaded() {
@@ -63,12 +65,10 @@ func (s *Store) ensureDiskCacheLoaded() {
 		entries[source{agent: entry.Agent, path: entry.Path}] = entry
 	}
 	s.disk = entries
+	s.diskSize = len(entries)
 }
 
-func (s *Store) saveDiskCache(files map[source]*cachedFile) {
-	if s.cachePath == "" {
-		return
-	}
+func (s *Store) saveDiskCache(files map[source]*cachedFile) bool {
 	entries := make([]diskCacheEntry, 0, len(files))
 	for src, file := range files {
 		if file == nil || file.info == nil {
@@ -93,29 +93,31 @@ func (s *Store) saveDiskCache(files map[source]*cachedFile) {
 	}
 	dir := filepath.Dir(s.cachePath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return
+		return false
 	}
 	tmp, err := os.CreateTemp(dir, ".sessions-cache-*.tmp")
 	if err != nil {
-		return
+		return false
 	}
 	tmpPath := tmp.Name()
 	enc, err := zstd.NewWriter(tmp, zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		tmp.Close()
 		_ = os.Remove(tmpPath)
-		return
+		return false
 	}
 	encodeErr := gob.NewEncoder(enc).Encode(diskCachePayload{Version: sessionCacheVersion, Entries: entries})
 	closeEncErr := enc.Close()
 	closeFileErr := tmp.Close()
 	if encodeErr != nil || closeEncErr != nil || closeFileErr != nil {
 		_ = os.Remove(tmpPath)
-		return
+		return false
 	}
 	if err := os.Rename(tmpPath, s.cachePath); err != nil {
 		_ = os.Remove(tmpPath)
+		return false
 	}
+	return true
 }
 
 func (src source) refreshWithDisk(old *cachedFile, disk *diskCacheEntry) (*cachedFile, bool, error) {

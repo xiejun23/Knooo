@@ -32,13 +32,21 @@ func (err *InvalidReviewResponse) Error() string {
 func (err *InvalidReviewResponse) Unwrap() error { return ErrReviewResponse }
 
 var reviewNoise = []string{
-	"# AGENTS.md", "<environment_context>", "<user_instructions>", "<permissions instructions>",
+	"<environment_context>", "<user_instructions>", "<permissions instructions>",
 	"<system-reminder>", "<local-command-caveat>", "<local-command-stdout>", "<command-name>",
 	"<task-notification>", "<agent-notification>", "[Compressed conversation section]",
 }
 
 func reviewInput(message Input) (Input, bool) {
 	text := strings.TrimSpace(message.Text)
+	if strings.HasPrefix(text, "# AGENTS.md instructions for ") {
+		_, body, _ := strings.Cut(text, "\n")
+		if strings.HasPrefix(strings.TrimSpace(body), "<INSTRUCTIONS>") {
+			if _, remaining, found := strings.Cut(body, "</INSTRUCTIONS>"); found {
+				text = strings.TrimSpace(remaining)
+			}
+		}
+	}
 	for _, prefix := range reviewNoise {
 		if !strings.HasPrefix(text, prefix) {
 			continue
@@ -47,8 +55,9 @@ func reviewInput(message Input) (Input, bool) {
 		if prefix[0] != '<' || end < 0 {
 			return Input{}, false
 		}
-		_, text, _ = strings.Cut(text, "</"+prefix[1:end]+">")
-		text = strings.TrimSpace(text)
+		if _, remaining, found := strings.Cut(text, "</"+prefix[1:end]+">"); found {
+			text = strings.TrimSpace(remaining)
+		}
 	}
 	if text == "" || message.ID == "" || (message.Role != "user" && message.Role != "assistant") {
 		return Input{}, false
@@ -75,15 +84,12 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 	const maxReviewBatchOutput = 8192
 	input = min(input, maxReviewBatchInput)
 	output = min(output, maxReviewBatchOutput)
-	if model.MaxOutputTokens > 0 {
-		output = min(output, model.MaxOutputTokens)
-	}
-	if model.ContextWindow > 0 {
-		output = min(output, max(1, model.ContextWindow-MinInputBudget))
-		input = min(input, model.ContextWindow-output)
-	}
 	batchConfig := config
 	batchConfig.InputBudget, batchConfig.OutputBudget = input, output
+	input, output, err = fitBudgets(config, model, input, output)
+	if err != nil {
+		return err
+	}
 	if consumed < 0 || consumed > len(messages) {
 		return errors.New("distill: invalid review cursor")
 	}
@@ -161,8 +167,10 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 		if start < len(offsets) {
 			boundary = offsets[start]
 		}
-		overlap := reviewBoundaryContext(messages, boundary, carriedID, min(limit/5, 900))
-		previous, candidates := reviewContinuation(result, contextUser, carry >= 0, min(limit/4, 2400))
+		// A carried question and its context must leave room for a new message.
+		contextBudget := limit - used - sizes[start]
+		previous, candidates := reviewContinuation(result, contextUser, carry >= 0, min(limit/4, 2400, contextBudget))
+		overlap := reviewBoundaryContext(messages, boundary, carriedID, min(limit/5, 900, contextBudget-len(previous)))
 		prompt := reviewInstructions + overlap + previous
 		used += len(overlap) + len(previous)
 		for end < len(reduced) {
@@ -181,6 +189,9 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 			}
 			used += sizes[end]
 			end++
+		}
+		if end == start {
+			return errors.New("模型输入预算不足以继续处理新增消息")
 		}
 		batch := reduced[start:end]
 		original := filtered[start:end]

@@ -191,8 +191,9 @@ func TestPlatformLogsRecordModelLifecycleWithoutLeakingSecrets(t *testing.T) {
 	actions := make([]string, 0, len(payload.Events))
 	for _, ev := range payload.Events {
 		actions = append(actions, ev.Action)
-		if !strings.Contains(ev.Message, "本地测试网关") || !strings.Contains(ev.Message, gateway.URL+"/v1") {
-			t.Fatalf("expected connection identity and URL in %q, got: %s", ev.Action, ev.Message)
+		if !strings.Contains(ev.Message, "本地测试网关") || !strings.Contains(ev.Message, gateway.URL) ||
+			strings.Contains(ev.Message, gateway.URL+"/v1") {
+			t.Fatalf("expected connection identity and origin in %q, got: %s", ev.Action, ev.Message)
 		}
 	}
 	wantActions := []string{"删除模型连接", "停用模型连接", "更新模型连接", "读取模型列表", "模型连接测试通过", "新建模型连接"}
@@ -208,6 +209,7 @@ func TestPlatformLogsRecordModelLifecycleWithoutLeakingSecrets(t *testing.T) {
 }
 
 func TestPlatformLogsRecordDetailedSessionScan(t *testing.T) {
+	isolateSessionEnvironment(t)
 	home := t.TempDir()
 	codexDir := filepath.Join(home, ".codex", "sessions")
 	if err := os.MkdirAll(codexDir, 0o755); err != nil {
@@ -258,7 +260,8 @@ func TestPlatformLogsRecordDetailedSessionScan(t *testing.T) {
 		!strings.Contains(payload.Events[1].Message, "Codex 1 条") {
 		t.Fatalf("unexpected manual scan log: %+v", payload.Events[1])
 	}
-	if payload.Events[2].Action != "初次扫描会话来源" || !strings.Contains(payload.Events[2].Message, "共发现 1 条会话") {
+	if payload.Events[2].Action != "初次扫描会话来源" || !strings.Contains(payload.Events[2].Message, "共发现 1 条会话") ||
+		!strings.Contains(payload.Events[2].Message, "发现来源") || !strings.Contains(payload.Events[2].Message, "刷新文件") {
 		t.Fatalf("unexpected startup scan log: %+v", payload.Events[2])
 	}
 

@@ -255,15 +255,14 @@ func safeLogURL(raw string) string {
 		return ""
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return raw
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return ""
 	}
 	clean := url.URL{
 		Scheme: parsed.Scheme,
 		Host:   parsed.Host,
-		Path:   parsed.Path,
 	}
-	return strings.TrimRight(clean.String(), "/")
+	return clean.String()
 }
 
 func modelPresetLabel(preset string) string {
@@ -520,6 +519,19 @@ func formatScanSummary(trigger string, records []sessions.Session, warnings []st
 	}
 
 	lines := []string{summary}
+	if coverage.DiscoveryTime > 0 {
+		phases := []string{
+			"发现来源 " + formatDurationBrief(coverage.DiscoveryTime),
+			"刷新文件 " + formatDurationBrief(coverage.FileRefreshTime),
+		}
+		if coverage.CacheWriteTime > 0 {
+			phases = append(phases, "写入缓存 "+formatDurationBrief(coverage.CacheWriteTime))
+		}
+		if coverage.MessageRevisionTime > 0 {
+			phases = append(phases, "计算消息校验值 "+formatDurationBrief(coverage.MessageRevisionTime))
+		}
+		lines = append(lines, strings.Join(phases, " · "))
+	}
 	if trigger == "sources" {
 		lines = append(lines, fmt.Sprintf("来源配置：已保存 %d 个自定义扫描目录", customDirCount))
 	}
@@ -590,4 +602,3 @@ func formatScanSummary(trigger string, records []sessions.Session, warnings []st
 
 	return action, strings.Join(lines, "\n")
 }
-

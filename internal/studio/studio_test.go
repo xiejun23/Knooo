@@ -17,10 +17,15 @@ import (
 	"github.com/xiejun23/Knooo/internal/sessions"
 )
 
-func TestSessionListDiscoversHistoryWithoutRefresh(t *testing.T) {
-	for _, name := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "GEMINI_CLI_HOME", "COPILOT_HOME", "QWEN_HOME", "QWEN_RUNTIME_DIR"} {
+func isolateSessionEnvironment(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "GEMINI_CLI_HOME", "COPILOT_HOME", "QWEN_HOME", "QWEN_RUNTIME_DIR", "WORKBUDDY_CONFIG_DIR", "DSH_HOME"} {
 		t.Setenv(name, "")
 	}
+}
+
+func TestSessionListDiscoversHistoryWithoutRefresh(t *testing.T) {
+	isolateSessionEnvironment(t)
 	home := t.TempDir()
 	dir := filepath.Join(home, ".codex", "sessions")
 	if err := os.MkdirAll(dir, 0700); err != nil {

@@ -37,6 +37,12 @@ type Session struct {
 type ScanReport struct {
 	Environments []Environment `json:"environments"`
 	Roots        []ScanRoot    `json:"roots"`
+
+	MessageRevisions    map[string]string `json:"-"`
+	DiscoveryTime       time.Duration     `json:"-"`
+	FileRefreshTime     time.Duration     `json:"-"`
+	CacheWriteTime      time.Duration     `json:"-"`
+	MessageRevisionTime time.Duration     `json:"-"`
 }
 
 type ScanRoot struct {
@@ -64,6 +70,8 @@ type Store struct {
 	cachePath  string
 	diskLoaded bool
 	disk       map[source]diskCacheEntry
+	diskSize   int
+	diskDirty  bool
 }
 
 type source struct {
@@ -119,9 +127,12 @@ func (s *Store) Scan(extra map[string][]string) ([]Session, []string, ScanReport
 	defer s.mu.Unlock()
 
 	s.ensureDiskCacheLoaded()
+	discoverStarted := time.Now()
 	mounts := wslWindowsMounts()
 	sources, warnings, report := s.discover(extra, mounts)
+	report.DiscoveryTime = time.Since(discoverStarted)
 
+	refreshStarted := time.Now()
 	type refreshResult struct {
 		file    *cachedFile
 		changed bool
@@ -163,6 +174,7 @@ func (s *Store) Scan(extra map[string][]string) ([]Session, []string, ScanReport
 		}
 		wg.Wait()
 	}
+	report.FileRefreshTime = time.Since(refreshStarted)
 
 	files := make(map[source]*cachedFile, len(sources))
 	byID := make(map[string]candidate)
@@ -170,7 +182,7 @@ func (s *Store) Scan(extra map[string][]string) ([]Session, []string, ScanReport
 	projects := make(map[string]string)
 	namesByHome := make(map[string]map[string]string)
 	antigravityByIndex := make(map[string]map[string]antigravitySummary)
-	diskDirty := false
+	report.MessageRevisions = make(map[string]string, len(sources))
 	for i, discovered := range sources {
 		src := discovered.source
 		root := &report.Roots[discovered.root]
@@ -182,9 +194,7 @@ func (s *Store) Scan(extra map[string][]string) ([]Session, []string, ScanReport
 			warnings = append(warnings, fmt.Sprintf("%s: %v", src.agent, err))
 			file = cached
 		}
-		if res.changed {
-			diskDirty = true
-		}
+		s.diskDirty = s.diskDirty || res.changed
 		if file == nil {
 			continue
 		}
@@ -249,14 +259,25 @@ func (s *Store) Scan(extra map[string][]string) ([]Session, []string, ScanReport
 		}
 		previous, exists := byID[current.session.ID]
 		if !exists || current.preferredTo(previous) {
+			if file.messageRevision == "" {
+				revisionStarted := time.Now()
+				file.messageRevision = MessageRevision(current.session.Messages)
+				report.MessageRevisionTime += time.Since(revisionStarted)
+			}
+			report.MessageRevisions[current.session.ID] = file.messageRevision
 			byID[current.session.ID] = current
 		}
 	}
 	s.files = files
-	if s.cachePath != "" && (diskDirty || len(files) != len(s.disk)) {
-		s.saveDiskCache(files)
-		s.disk = nil
+	if s.cachePath != "" && (s.diskDirty || len(files) != s.diskSize) {
+		cacheStarted := time.Now()
+		if s.saveDiskCache(files) {
+			s.diskDirty = false
+			s.diskSize = len(files)
+		}
+		report.CacheWriteTime = time.Since(cacheStarted)
 	}
+	s.disk = nil
 
 	result := make([]Session, 0, len(byID))
 	for _, entry := range byID {

@@ -54,9 +54,10 @@ func (a *app) reportProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 type reportSource struct {
-	SessionID string `json:"sessionId"`
-	MessageID string `json:"messageId"`
-	Project   string `json:"project"`
+	SessionID       string `json:"sessionId"`
+	MessageID       string `json:"messageId"`
+	Project         string `json:"project"`
+	EvidenceVersion string `json:"evidenceVersion,omitempty"`
 }
 
 type reportItem struct {
@@ -168,21 +169,26 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无法读取会话归档", http.StatusInternalServerError)
 		return
 	}
-	cached, err := a.readReviews(r.Context())
-	if err != nil {
-		http.Error(w, "无法读取工作回顾", http.StatusInternalServerError)
-		return
-	}
 	items, revisions := a.reviewSnapshot()
-	result := workReport{Title: "工作" + layout.name, Mode: "local"}
-	var groups []reportFactGroup
+	var scoped []sessions.Session
+	var scopedIDs []string
 	for _, item := range items {
 		if archived[item.ID] || !inReviewScope(item, query) || !slices.ContainsFunc(item.Messages, func(message sessions.Message) bool {
 			return inReviewWindow(message.Timestamp, from, to)
 		}) {
 			continue
 		}
-		result.Coverage.Active++
+		scoped = append(scoped, item)
+		scopedIDs = append(scopedIDs, item.ID)
+	}
+	cached, err := a.readReviewsFor(r.Context(), scopedIDs)
+	if err != nil {
+		http.Error(w, "无法读取工作回顾", http.StatusInternalServerError)
+		return
+	}
+	result := workReport{Title: "工作" + layout.name, Mode: "local", Sections: []reportSection{}, Coverage: reportCoverage{Active: len(scoped)}}
+	var groups []reportFactGroup
+	for _, item := range scoped {
 		checkpoint, valid := cached[item.ID].verified(item.Messages, revisions[item.ID])
 		if !valid {
 			continue
@@ -191,13 +197,14 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 			result.Coverage.Ready++
 		}
 		roles := make(map[string]string, checkpoint.Consumed)
-		during := make(map[string]bool)
-		for _, message := range item.Messages[:checkpoint.Consumed] {
+		during := make(map[string]int)
+		for index, message := range item.Messages[:checkpoint.Consumed] {
 			roles[message.ID] = message.Role
 			if inReviewWindow(message.Timestamp, from, to) {
-				during[message.ID] = true
+				during[message.ID] = index
 			}
 		}
+		versions := make(map[string]string)
 		group := reportFactGroup{session: item, project: [3]string{item.Platform, item.WSL, projectPath(item)}}
 		for _, topic := range distill.ConsolidateReviewTopics(checkpoint.Topics) {
 			entry, found := reportTopic(topic, roles, during)
@@ -206,7 +213,12 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 			}
 			fact := reportFact{topic: entry, sources: make([]reportSource, 0, len(entry.Evidence))}
 			for _, id := range entry.Evidence {
-				fact.sources = append(fact.sources, reportSource{item.ID, id, item.Project})
+				version, exists := versions[id]
+				if !exists {
+					version = messageEvidenceVersion(item.Messages[during[id]])
+					versions[id] = version
+				}
+				fact.sources = append(fact.sources, reportSource{item.ID, id, item.Project, version})
 			}
 			group.facts = append(group.facts, fact)
 			result.Coverage.Topics++
@@ -263,10 +275,16 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	result.Markdown = renderWorkReport(result, from, to)
+	if r.Method == http.MethodPost {
+		if err := a.storeGeneratedReport(r.Context(), reportDocumentScope(query, from, to), result); err != nil {
+			http.Error(w, "无法保存生成的报告", http.StatusInternalServerError)
+			return
+		}
+	}
 	jsonReply(w, result)
 }
 
-func reportTopic(topic distill.Topic, roles map[string]string, during map[string]bool) (distill.Topic, bool) {
+func reportTopic(topic distill.Topic, roles map[string]string, during map[string]int) (distill.Topic, bool) {
 	if len(topic.ReviewHistory) == 0 {
 		return reportContribution(topic, roles, during)
 	}
@@ -294,17 +312,18 @@ func reportTopic(topic distill.Topic, roles map[string]string, during map[string
 	return entry, found
 }
 
-func reportContribution(topic distill.Topic, roles map[string]string, during map[string]bool) (distill.Topic, bool) {
+func reportContribution(topic distill.Topic, roles map[string]string, during map[string]int) (distill.Topic, bool) {
 	var questions, answers []string
 	answerOutside := false
 	for _, id := range topic.Evidence {
+		_, inWindow := during[id]
 		switch roles[id] {
 		case "user":
-			if during[id] {
+			if inWindow {
 				questions = append(questions, id)
 			}
 		case "assistant":
-			if during[id] {
+			if inWindow {
 				answers = append(answers, id)
 			} else {
 				answerOutside = true

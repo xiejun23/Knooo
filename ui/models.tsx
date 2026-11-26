@@ -53,6 +53,9 @@ type Discovery =
  | { kind: 'error'; message: string };
 type Model = { id: string; display_name?: string; owned_by?: string; context_window?: number; max_output_tokens?: number };
 type API = <T>(path: string, data?: unknown, signal?: AbortSignal) => Promise<T>;
+type ReviewSettings =
+ | { connectionId: string; maxAgeDays: number; settingsError?: never }
+ | { connectionId: string; settingsError: string; maxAgeDays?: never };
 
 const connectionIcons = [
  { id: 'generic', name: '通用', src: '' }, { id: 'openai', name: 'OpenAI', src: openai },
@@ -78,16 +81,18 @@ export function SettingsWorkspace({ connections, api, onChange, demo }: {
  const [reviewConnectionId, setReviewConnectionId] = useState<string | undefined>(demo ? '' : undefined);
  const [reviewMaxAgeDays, setReviewMaxAgeDays] = useState<number>(0);
  const [reviewLoadError, setReviewLoadError] = useState('');
+ const [reviewWindowError, setReviewWindowError] = useState('');
  const [editing, setEditing] = useState(false);
 
  useEffect(() => {
   if (demo) return;
   const controller = new AbortController();
-  api<{ connectionId: string; maxAgeDays?: number }>('review-settings', undefined, controller.signal).then(({ connectionId, maxAgeDays }) => {
+  api<ReviewSettings>('review-settings', undefined, controller.signal).then(({ connectionId, maxAgeDays, settingsError }) => {
    if (!controller.signal.aborted) {
     setReviewConnectionId(connectionId);
     setReviewMaxAgeDays(maxAgeDays ?? 0);
     setReviewLoadError('');
+    setReviewWindowError(settingsError ?? '');
    }
   }).catch(err => {
    if (!controller.signal.aborted) setReviewLoadError(err instanceof Error ? err.message : String(err));
@@ -110,8 +115,9 @@ export function SettingsWorkspace({ connections, api, onChange, demo }: {
    demo={demo}
    savedConnectionId={reviewConnectionId}
    savedMaxAgeDays={reviewMaxAgeDays}
+   savedWindowError={reviewWindowError}
    loadError={reviewLoadError}
-   onSavedChange={(id, days) => { setReviewConnectionId(id); setReviewMaxAgeDays(days); }}
+   onSavedChange={(id, days) => { setReviewConnectionId(id); setReviewMaxAgeDays(days); setReviewWindowError(''); }}
   />}
  </div>;
 }
@@ -129,6 +135,7 @@ export function AutomaticReviewSettings({
  demo,
  savedConnectionId,
  savedMaxAgeDays,
+ savedWindowError,
  loadError,
  onSavedChange,
 }: {
@@ -137,11 +144,13 @@ export function AutomaticReviewSettings({
  demo: boolean;
  savedConnectionId?: string;
  savedMaxAgeDays?: number;
+ savedWindowError?: string;
  loadError?: string;
  onSavedChange?: (id: string, maxAgeDays: number) => void;
 }) {
  const [internalSaved, setInternalSaved] = useState<string>();
  const [internalDays, setInternalDays] = useState<number>(0);
+ const [internalWindowError, setInternalWindowError] = useState('');
  const [selected, setSelected] = useState('');
  const [maxAgeDays, setMaxAgeDays] = useState<number>(30);
  const [busy, setBusy] = useState(false);
@@ -151,16 +160,18 @@ export function AutomaticReviewSettings({
  const controlled = savedConnectionId !== undefined || onSavedChange !== undefined;
  const saved = controlled ? savedConnectionId : internalSaved;
  const savedDays = controlled ? (savedMaxAgeDays ?? 0) : internalDays;
+ const windowError = controlled ? savedWindowError : internalWindowError;
 
  useEffect(() => {
   if (demo || controlled) return;
   const controller = new AbortController();
-  api<{ connectionId: string; maxAgeDays?: number }>('review-settings', undefined, controller.signal).then(({ connectionId, maxAgeDays: days }) => {
+  api<ReviewSettings>('review-settings', undefined, controller.signal).then(({ connectionId, maxAgeDays: days, settingsError }) => {
    if (!controller.signal.aborted) {
     setInternalSaved(connectionId);
     setSelected(connectionId);
-    const resolvedDays = days ?? (connectionId ? 0 : 30);
+    const resolvedDays = settingsError ? 30 : (days ?? (connectionId ? 0 : 30));
     setInternalDays(days ?? 0);
+    setInternalWindowError(settingsError ?? '');
     setMaxAgeDays(resolvedDays);
    }
   }).catch(err => {
@@ -172,17 +183,17 @@ export function AutomaticReviewSettings({
  useEffect(() => {
   if (controlled && savedConnectionId !== undefined) {
    setSelected(savedConnectionId);
-   setMaxAgeDays(savedConnectionId ? (savedMaxAgeDays ?? 0) : ((savedMaxAgeDays ?? 0) || 30));
+   setMaxAgeDays(savedWindowError ? 30 : (savedConnectionId ? (savedMaxAgeDays ?? 0) : ((savedMaxAgeDays ?? 0) || 30)));
   }
- }, [controlled, savedConnectionId, savedMaxAgeDays]);
+ }, [controlled, savedConnectionId, savedMaxAgeDays, savedWindowError]);
 
  if (demo) return null;
 
  const enabledProfiles = profiles.filter(profile => !profile.disabled);
  const chosen = profiles.find(profile => profile.id === selected);
  const savedProfile = profiles.find(profile => profile.id === saved);
- const activeRunning = !!saved && !!savedProfile && !savedProfile.disabled && savedProfile.ready && !!savedProfile.model;
- const dirty = selected !== saved || (!!selected && maxAgeDays !== savedDays);
+ const activeRunning = !windowError && !!saved && !!savedProfile && !savedProfile.disabled && savedProfile.ready && !!savedProfile.model;
+ const dirty = !!windowError || selected !== saved || (!!selected && maxAgeDays !== savedDays);
 
  async function save(event: FormEvent) {
   event.preventDefault();
@@ -192,7 +203,7 @@ export function AutomaticReviewSettings({
   try {
    await api('review-settings', { connectionId: selected, maxAgeDays });
    if (onSavedChange) onSavedChange(selected, maxAgeDays);
-   else { setInternalSaved(selected); setInternalDays(maxAgeDays); }
+   else { setInternalSaved(selected); setInternalDays(maxAgeDays); setInternalWindowError(''); }
    setStatus(selected ? '自动工作回顾设置已保存。' : '自动工作回顾已关闭。');
   } catch (err) {
    setError(err instanceof Error ? err.message : String(err));
@@ -201,7 +212,7 @@ export function AutomaticReviewSettings({
   }
  }
 
- const displayError = error || loadError || '';
+ const displayError = error || windowError || loadError || '';
  const unavailableHint = selected && chosen
   ? chosen.disabled
    ? '该提供商当前已停用，请先在上方启用或改选其他提供商。'
@@ -218,7 +229,7 @@ export function AutomaticReviewSettings({
    </div>
    <span className="provider-status" data-status={activeRunning ? 'ready' : 'disabled'}>
     <span className="provider-status-dot" aria-hidden="true"/>
-    <span>{activeRunning ? '后台运行中' : '未启用'}</span>
+    <span>{windowError ? '已暂停' : activeRunning ? '后台运行中' : '未启用'}</span>
    </span>
   </div>
   <div className="auto-review-row">

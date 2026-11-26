@@ -40,7 +40,9 @@ type Topic struct {
 	Exercise string   `json:"exercise"`
 	Evidence []string `json:"evidence"`
 
-	ReviewHistory []ReviewContribution `json:"reviewHistory,omitempty"`
+	ReviewHistory    []ReviewContribution `json:"reviewHistory,omitempty"`
+	EvidenceVersions map[string]string    `json:"evidenceVersions,omitempty"`
+	EvidenceStale    bool                 `json:"evidenceStale,omitempty"`
 }
 
 type ReviewContribution struct {
@@ -88,6 +90,8 @@ func parseTopics(text string, refs map[string]int) ([]Topic, error) {
 	for i := range result.Topics {
 		topic := &result.Topics[i]
 		topic.ReviewHistory = nil
+		topic.EvidenceVersions = nil
+		topic.EvidenceStale = false
 		if strings.TrimSpace(topic.Title) == "" || len(topic.Evidence) == 0 {
 			return nil, errors.New("distill: topic requires a title and evidence")
 		}

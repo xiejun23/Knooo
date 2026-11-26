@@ -20,13 +20,13 @@ import (
 )
 
 type modelConnection struct {
-	ID           string `json:"id"`
-	Preset       string `json:"preset"`
-	Icon         string `json:"icon,omitempty"`
-	GatewayAPI   string `json:"gatewayApi,omitempty"`
-	APIProtocol  string `json:"apiProtocol,omitempty"`
-	Name         string `json:"name"`
-	BaseURL      string `json:"baseUrl"`
+	ID              string `json:"id"`
+	Preset          string `json:"preset"`
+	Icon            string `json:"icon,omitempty"`
+	GatewayAPI      string `json:"gatewayApi,omitempty"`
+	APIProtocol     string `json:"apiProtocol,omitempty"`
+	Name            string `json:"name"`
+	BaseURL         string `json:"baseUrl"`
 	Model           string `json:"model"`
 	Ready           bool   `json:"ready"`
 	HasKey          bool   `json:"hasKey,omitempty"`
@@ -98,7 +98,7 @@ func (profile modelConnection) config(key string) (distill.Config, bool) {
 			return distill.Config{
 				Provider: protocol, Model: profile.Model, BaseURL: base, APIKey: key,
 				ReasoningEffort: profile.ReasoningEffort,
-				InputBudget: profile.InputBudget, OutputBudget: profile.OutputBudget,
+				InputBudget:     profile.InputBudget, OutputBudget: profile.OutputBudget,
 			}, true
 		}
 	}
@@ -164,17 +164,16 @@ func magpieDefaultBase() string {
 
 // reusableKey is called while the key store is locked.
 func (a *app) reusableKey(id string, preset string, current distill.Config) string {
-	var previous modelConnection
-	var content string
-	if a.db.QueryRow(`SELECT content FROM settings WHERE name=?`, "model:"+id).Scan(&content) != nil ||
-		json.Unmarshal([]byte(content), &previous) != nil || previous.normalize().Preset != preset {
+	previous, found := a.loadSavedModelConnection(id)
+	if !found || !sameKeyBinding(previous, preset, current) {
 		return ""
 	}
+	return a.savedModelKey(previous, current)
+}
+
+func sameKeyBinding(previous modelConnection, preset string, current distill.Config) bool {
 	config, err := previous.validatedConfig("")
-	if err != nil || config.BaseURL != current.BaseURL || config.Provider != current.Provider {
-		return ""
-	}
-	return a.savedModelKey(previous, config)
+	return err == nil && previous.Preset == preset && config.BaseURL == current.BaseURL && config.Provider == current.Provider
 }
 
 func (a *app) modelConnections(w http.ResponseWriter, _ *http.Request) {
@@ -220,16 +219,20 @@ func (a *app) modelConnections(w http.ResponseWriter, _ *http.Request) {
 
 // The caller holds a.keys.
 func (a *app) loadSavedModelConnection(id string) (modelConnection, bool) {
-	if id == "" {
-		return modelConnection{}, false
-	}
+	profile, err := a.readSavedModelConnection(id)
+	return profile, err == nil
+}
+
+func (a *app) readSavedModelConnection(id string) (modelConnection, error) {
 	var profile modelConnection
 	var content string
-	if a.db.QueryRow(`SELECT content FROM settings WHERE name=?`, "model:"+id).Scan(&content) != nil ||
-		json.Unmarshal([]byte(content), &profile) != nil {
-		return modelConnection{}, false
+	if err := a.db.QueryRow(`SELECT content FROM settings WHERE name=?`, "model:"+id).Scan(&content); err != nil {
+		return modelConnection{}, err
 	}
-	return profile.normalize(), true
+	if err := json.Unmarshal([]byte(content), &profile); err != nil {
+		return modelConnection{}, err
+	}
+	return profile.normalize(), nil
 }
 
 func (a *app) setModelConnection(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +261,7 @@ func (a *app) setModelConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Remove {
 		existing, found := a.loadSavedModelConnection(profile.ID)
-		if err := a.writeModelConnection(profile, nil, true); err != nil {
+		if err := a.writeModelConnection(profile, nil, true, false); err != nil {
 			http.Error(w, "无法删除模型连接", 500)
 			return
 		}
@@ -303,7 +306,6 @@ func (a *app) saveModelConnection(profile modelConnection, apiKey string, clearK
 	if profile.Name == "" || len(profile.Name) > 200 || len(profile.Model) > 240 || len(profile.BaseURL) > 500 || len(apiKey) > 4096 {
 		return profile, 400, errors.New("请检查连接名称、模型 ID、API 地址和密钥")
 	}
-	previous, existed := a.loadSavedModelConnection(profile.ID)
 	keyInput := strings.TrimSpace(apiKey)
 	key := keyInput
 	config, err := profile.validatedConfig(key)
@@ -316,10 +318,16 @@ func (a *app) saveModelConnection(profile modelConnection, apiKey string, clearK
 		})
 		return profile, 400, err
 	}
+	previous, err := a.readSavedModelConnection(profile.ID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return profile, 500, errors.New("无法读取已保存的模型连接")
+	}
+	existed := err == nil
+	keepKey := !clearKey && key == "" && existed && sameKeyBinding(previous, profile.Preset, config)
 	if clearKey {
 		key = ""
-	} else if key == "" {
-		key = a.reusableKey(profile.ID, profile.Preset, config)
+	} else if keepKey && a.data == "" {
+		key = a.keys.values[profile.ID]
 	}
 	profile.BaseURL, profile.Ready, profile.HasKey = config.BaseURL, false, false
 	profile.InputBudget, profile.OutputBudget = config.InputBudget, config.OutputBudget
@@ -330,11 +338,13 @@ func (a *app) saveModelConnection(profile modelConnection, apiKey string, clearK
 			return profile, 500, errors.New("无法加密保存 API 密钥")
 		}
 	}
-	if err := a.writeModelConnection(profile, secret, false); err != nil {
+	if err := a.writeModelConnection(profile, secret, false, keepKey); err != nil {
 		return profile, 500, errors.New("无法保存模型连接")
 	}
 	if a.data == "" {
 		a.keys.values[profile.ID] = key
+	} else if keepKey {
+		key = a.savedModelKey(profile, config)
 	}
 	a.wakeReview(true)
 	profile.HasKey = key != ""

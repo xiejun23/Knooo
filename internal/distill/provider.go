@@ -81,7 +81,7 @@ func requestText(ctx context.Context, config Config, instruction, input string, 
 		case "none":
 			payload["thinking"] = map[string]any{"type": "disabled"}
 		case "low", "medium", "high":
-			budget := thinkingBudgetTokens(effort)
+			budget := anthropicThinkingBudget(config)
 			payload["max_tokens"] = maxTokens + budget
 			payload["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
 		}
@@ -139,6 +139,13 @@ func thinkingBudgetTokens(effort string) int {
 	default:
 		return 0
 	}
+}
+
+func anthropicThinkingBudget(config Config) int {
+	if strings.EqualFold(strings.TrimSpace(config.Provider), "anthropic") {
+		return thinkingBudgetTokens(strings.ToLower(strings.TrimSpace(config.ReasoningEffort)))
+	}
+	return 0
 }
 
 func connection(config Config) (provider, base string, headers http.Header, err error) {

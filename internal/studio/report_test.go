@@ -136,6 +136,9 @@ func TestReportSynthesisUsesOnlyScopedReviewFacts(t *testing.T) {
 		!strings.Contains(model.Markdown, "支付与通知重放均已拦截重复写入") || strings.Contains(model.Markdown, api.ID) {
 		t.Fatalf("unexpected model report or sources: %+v", model)
 	}
+	if source := model.Sections[0].Items[0].Sources[0]; source.EvidenceVersion != messageEvidenceVersion(api.Messages[0]) {
+		t.Fatalf("report did not retain the first source's evidence version: %+v", source)
+	}
 	for range 3 {
 		fallback := request(http.MethodPost, path, body)
 		if fallback.Mode != "local" || fallback.Notice != "模型综合暂不可用，已使用本地汇总。" ||
@@ -230,6 +233,62 @@ func TestReportMarkdownEscapesSummary(t *testing.T) {
 		if !strings.Contains(markdown, "\n\n"+test.escaped+"\n") {
 			t.Fatalf("expected escaped summary in %s", markdown)
 		}
+	}
+}
+
+func TestReportDocumentKeepsDraftAcrossGenerationAndRestart(t *testing.T) {
+	data := t.TempDir()
+	item := reviewTestSession()
+	initialApp := openReviewTestApp(t, data, item)
+	query := url.Values{
+		"kind": {"weekly"}, "from": {"2026-04-01T00:00:00Z"}, "to": {"2026-04-08T00:00:00Z"},
+		"agent": {"codex", "claude"},
+	}
+	generate := "/api/report?" + query.Encode()
+	query["agent"] = []string{"claude", "codex"}
+	path := "/api/report/document?" + query.Encode()
+
+	read := func(a *app) reportDocument {
+		t.Helper()
+		var doc reportDocument
+		raw := reviewTestRequest(t, a, "GET", path, "")
+		if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+			t.Fatalf("cannot read saved report: %s (%v)", raw, err)
+		}
+		return doc
+	}
+	write := func(a *app, draft *workReport, draftRevision, reportRevision int64) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"draft": draft, "draftRevision": draftRevision, "reportRevision": reportRevision})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reviewTestRequest(t, a, http.MethodPost, path, string(body))
+	}
+
+	initial := decodeTestReport(t, []byte(reviewTestRequest(t, initialApp, http.MethodPost, generate, `{"connectionId":""}`)))
+	first := read(initialApp)
+	if first.ReportRevision != 1 || first.DraftRevision != 0 || string(first.Draft) != "null" {
+		t.Fatalf("unexpected new document: %+v", first)
+	}
+	initial.Title = "手工编辑的周报"
+	reviewTestRequest(t, initialApp, http.MethodPost, generate, `{"connectionId":""}`)
+	write(initialApp, &initial, first.DraftRevision, first.ReportRevision)
+	reviewTestRequest(t, initialApp, http.MethodPost, generate, `{"connectionId":""}`)
+	if err := initialApp.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := openReviewTestApp(t, data, item)
+	doc := read(reopened)
+	if doc.ReportRevision != 3 || doc.DraftRevision != 1 ||
+		decodeTestReport(t, doc.Report).Title != "工作周报" || decodeTestReport(t, doc.Draft).Title != initial.Title {
+		t.Fatalf("reopening changed a generated version or the draft: %+v", doc)
+	}
+	write(reopened, nil, doc.DraftRevision, doc.ReportRevision)
+	restored := read(reopened)
+	if restored.ReportRevision != 3 || restored.DraftRevision != 2 || string(restored.Draft) != "null" {
+		t.Fatalf("restoring the generated report changed unexpected fields: %+v", restored)
 	}
 }
 

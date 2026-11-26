@@ -19,16 +19,18 @@ const (
 )
 
 type Plan struct {
-	InputBudget    int    `json:"inputBudget"`
-	OutputBudget   int    `json:"outputBudget"`
-	EstimatedInput int    `json:"estimatedInput"`
-	Included       int    `json:"included"`
-	Total          int    `json:"total"`
-	Shortened      bool   `json:"shortened"`
-	ContextWindow  int    `json:"contextWindow,omitempty"`
-	Confirmation   string `json:"confirmation"`
-	transcript     string
-	refs           map[string]int
+	InputBudget       int    `json:"inputBudget"`
+	OutputBudget      int    `json:"outputBudget"`
+	ThinkingBudget    int    `json:"thinkingBudget,omitempty"`
+	TotalOutputBudget int    `json:"totalOutputBudget"`
+	EstimatedInput    int    `json:"estimatedInput"`
+	Included          int    `json:"included"`
+	Total             int    `json:"total"`
+	Shortened         bool   `json:"shortened"`
+	ContextWindow     int    `json:"contextWindow,omitempty"`
+	Confirmation      string `json:"confirmation"`
+	transcript        string
+	refs              map[string]int
 }
 
 func Budgets(input, output int) (int, int, error) {
@@ -49,19 +51,30 @@ func Prepare(config Config, model Model, messages []Input) (Plan, error) {
 	return prepare(config, model, messages, instructions)
 }
 
+func fitBudgets(config Config, model Model, input, output int) (int, int, error) {
+	thinking := anthropicThinkingBudget(config)
+	if model.MaxOutputTokens > 0 {
+		output = min(output, model.MaxOutputTokens-thinking)
+	}
+	if model.ContextWindow > 0 {
+		output = min(output, max(1, model.ContextWindow-MinInputBudget)-thinking)
+		input = min(input, model.ContextWindow-output-thinking)
+	}
+	if output < 1 {
+		return 0, 0, errors.New("模型的输出上限不足以容纳推理预算，请降低推理强度或更换模型")
+	}
+	return input, output, nil
+}
+
 func prepare(config Config, model Model, messages []Input, prompt string) (Plan, error) {
 	input, output, err := Budgets(config.InputBudget, config.OutputBudget)
 	if err != nil {
 		return Plan{}, err
 	}
-	if model.MaxOutputTokens > 0 {
-		output = min(output, model.MaxOutputTokens)
+	input, output, err = fitBudgets(config, model, input, output)
+	if err != nil {
+		return Plan{}, err
 	}
-	if model.ContextWindow > 0 {
-		output = min(output, max(1, model.ContextWindow-MinInputBudget))
-		input = min(input, model.ContextWindow-output)
-	}
-
 	refs := messageIDs(messages)
 	if len(refs) == 0 {
 		return Plan{}, errors.New("distill: no messages with reference IDs")
@@ -108,12 +121,14 @@ func prepare(config Config, model Model, messages []Input, prompt string) (Plan,
 	}
 	slices.Reverse(selected)
 	transcript := "[" + strings.Join(selected, ",") + "]"
+	thinking := anthropicThinkingBudget(config)
 	plan := Plan{
 		InputBudget: input, OutputBudget: output, EstimatedInput: used, Included: len(selected),
+		ThinkingBudget: thinking, TotalOutputBudget: output + thinking,
 		Total: len(messages), Shortened: shortened, ContextWindow: model.ContextWindow,
 		transcript: transcript, refs: includedRefs,
 	}
-	confirmation, _ := json.Marshal([]any{config.Provider, config.BaseURL, config.Model, input, output, prompt, transcript, plan.Total})
+	confirmation, _ := json.Marshal([]any{config.Provider, config.BaseURL, config.Model, config.ReasoningEffort, input, plan.TotalOutputBudget, prompt, transcript, plan.Total})
 	hash := sha256.Sum256(confirmation)
 	plan.Confirmation = hex.EncodeToString(hash[:])
 	return plan, nil
