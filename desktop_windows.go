@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -36,6 +37,10 @@ const (
 
 	trayOpen = 1
 	trayQuit = 2
+
+	themeNonClient  = 1
+	hideCaption     = 0x1
+	hideCaptionIcon = 0x2
 )
 
 var (
@@ -70,10 +75,13 @@ var (
 	shellNotifyIcon  = shell32.NewProc("Shell_NotifyIconW")
 )
 
+var setWindowThemeAttribute = windows.NewLazySystemDLL("uxtheme.dll").NewProc("SetWindowThemeAttribute")
+
 type desktopHost struct {
 	class       string
 	mutex       windows.Handle
 	startHidden bool
+	hwnd        atomic.Uintptr
 }
 
 func newDesktopHost(single, tray bool) (*desktopHost, error) {
@@ -280,6 +288,13 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 	}
 	window.hwnd = hwnd
 	defer destroyWindow.Call(hwnd)
+	h.hwnd.Store(hwnd)
+	defer h.hwnd.Store(0)
+
+	// The sidebar draws the brand. Keep the window name available to Windows.
+	const hidden = hideCaption | hideCaptionIcon
+	options := struct{ flags, mask uint32 }{flags: hidden, mask: hidden}
+	setWindowThemeAttribute.Call(hwnd, themeNonClient, uintptr(unsafe.Pointer(&options)), unsafe.Sizeof(options))
 
 	window.tray = trayIconData{id: 1, window: hwnd, flags: 0x7, message: wmTray, icon: icon, version: 4}
 	window.tray.size = uint32(unsafe.Sizeof(window.tray))
@@ -304,6 +319,11 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 
 func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
 	switch message {
+	case wmDesktopTopmost:
+		if w.hwnd == hwnd {
+			return windowTopmost(hwnd, wParam)
+		}
+		return 0
 	case wmSize:
 		w.resize()
 	case wmMove:

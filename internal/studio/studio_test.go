@@ -79,7 +79,7 @@ func TestWorkspaceFlow(t *testing.T) {
 	defer a.db.Close()
 	const addr = "127.0.0.1:43170"
 	const token = "launch-capability"
-	handler := a.Handler(addr, token, http.NotFoundHandler(), "1.2.3", "# Release notes", nil)
+	handler := a.Handler(addr, token, http.NotFoundHandler(), "1.2.3", "# Release notes", nil, nil)
 	request := func(method, path, body, auth, origin string, want int) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, "http://"+addr+path, strings.NewReader(body))

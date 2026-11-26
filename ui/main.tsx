@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Archive, ArchiveRestore, ArrowLeft, ArrowRight, ArrowUpRight, BookOpen, CalendarDays, Check, ChevronDown, ChevronRight, CircleHelp, Copy, FileStack, FileText, Folder, FolderGit2, LayoutList, ListChecks, ListTree, MessagesSquare, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, RefreshCw, ScanText, Search, SlidersHorizontal, SquareTerminal, X } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowLeft, ArrowRight, ArrowUpRight, BookOpen, CalendarDays, Check, ChevronDown, ChevronRight, CircleHelp, Copy, FileStack, FileText, Folder, FolderGit2, LayoutList, ListChecks, ListTree, MessagesSquare, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Pin, Plus, RefreshCw, ScanText, Search, SlidersHorizontal, SquareTerminal, X } from 'lucide-react';
 import { ModelPicker, SettingsWorkspace, type Connections, type Profile } from './models';
 import { PanelGrip } from './panels';
 import { Pagination } from './pagination';
@@ -68,6 +68,15 @@ async function api<T>(path: string, data?: unknown, signal?: AbortSignal): Promi
  if (!response.ok) throw new Error((await response.text()).trim() || '操作失败');
  return response.json();
 }
+
+function readWindowPin(response: unknown) {
+ if (!response || typeof response !== 'object' || !('available' in response) ||
+     typeof response.available !== 'boolean' || !('pinned' in response) || typeof response.pinned !== 'boolean') {
+  throw new Error('无法读取窗口置顶状态。');
+ }
+ return response.available ? response.pinned : undefined;
+}
+
 function Empty({ icon, title, children }: {icon: ReactNode; title: string; children: ReactNode}) { return <div className="empty"><span className="empty-icon">{icon}</span><h3>{title}</h3>{children}</div>; }
 function ProjectIcon() { return <span className="project-icon"><FolderGit2 size={18}/></span>; }
 
@@ -99,6 +108,8 @@ function App() {
  const [focus, setFocus] = useState<ReaderFocus>();
  const [viewport,setViewport] = useState(window.innerWidth);
  const [navCollapsed,setNavCollapsed] = useState(localStorage.getItem('knooo-nav-collapsed') === 'true');
+ const [windowPinned, setWindowPinned] = useState<boolean>();
+ const [pinPending, setPinPending] = useState(false);
  const [readerCollapsed,setReaderCollapsed] = useState(false);
  const [leftWidth,setLeftWidth] = useState(()=>savedWidth('knooo-left-width',204,leftBounds));
  const [rightWidth,setRightWidth] = useState(()=>savedWidth('knooo-right-width',432,rightBounds));
@@ -123,6 +134,9 @@ function App() {
  const maxRight = Math.min(rightBounds.max,Math.max(rightBounds.min,viewport-left-358));
  const maxLeft = Math.min(leftBounds.max,Math.max(leftBounds.min,viewport-(showReader ? rightBounds.min : 0)-358));
  const displayLeft = Math.min(left,maxLeft);
+ const navToggleLabel = navCollapsed ? '展开导航栏' : '收起导航栏';
+ const NavToggleIcon = navCollapsed ? PanelLeftOpen : PanelLeftClose;
+ const appVersion = `v${about?.version ?? '0.1.2'}`;
 
  async function checkUpdate() {
   if (updateBusy.current) return;
@@ -167,6 +181,17 @@ function App() {
  const searchPage = searchPosition.scope===searchScope ? searchPosition.page : 1;
  const sessionMap = useMemo(() => new Map(listing.sessions.map(session => [session.id, session])), [listing]);
  const fail = (err:unknown) => setError(err instanceof Error ? err.message : String(err));
+ async function toggleWindowPin() {
+  if (windowPinned === undefined || pinPending) return;
+  setPinPending(true);
+  try {
+   setWindowPinned(readWindowPin(await api<unknown>('desktop-topmost', { pinned: !windowPinned })));
+  } catch (err) {
+   fail(err);
+  } finally {
+   setPinPending(false);
+  }
+ }
  function collapseReader() { setReaderCollapsed(true);readerToggle.current?.focus(); }
  async function retryReviewSession(id: string, incremental: boolean) {
   setError('');
@@ -250,6 +275,7 @@ function App() {
  useEffect(() => {
   loadConnections().catch(fail).finally(()=>setLoadingConnections(false));
   api<About>('about').then(value=>{setAbout(value);if (!value.demo) void checkUpdate();}).catch(err=>{setAbout(null);fail(err);});
+  api<unknown>('desktop-topmost').then(readWindowPin).then(setWindowPinned).catch(fail);
   loadListing().catch(fail).finally(()=>setLoadingListing(false));
  },[]);
  useEffect(() => {
@@ -312,18 +338,35 @@ function App() {
  const refreshAction = about?.demo ? undefined : <button className="button secondary" disabled={scanning} onClick={()=>void refresh()}>{refreshing && ready ? <EagleMark flying/> : <RefreshCw size={16}/>} {scanning ? '正在发现会话' : '刷新会话'}</button>;
  return <div className={`shell ${showReader ? 'with-reader' : ''} ${navCollapsed ? 'nav-compact' : ''}`} style={{gridTemplateColumns:narrow ? undefined : `${displayLeft}px minmax(0,1fr)${showReader ? ` ${displayRight}px` : ''}`}}>
   <aside className="rail" id="navigation" aria-label="主导航">
-   <button className="brand" aria-label="Knooo 首页" title="Knooo" onClick={()=>navigate('review')}><EagleMark/><span>Knooo</span></button>
-   <nav className="nav-group" aria-label="工作台">{nav.slice(0,5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
-   <nav className="nav-group system" aria-label="应用">{nav.slice(5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
-   <div className="rail-bottom">{about?.demo && <div><span className="connection-dot"/><span>演示工作区</span></div>}<button onClick={()=>navigate('about')}>v{about?.version ?? '0.1.2'} <ArrowUpRight size={13}/></button></div>
+   <button className="brand" aria-label="Knooo 首页" title="Knooo" onClick={()=>navigate('review')}>
+    <EagleMark/>
+    <span className="brand-wordmark" aria-hidden="true"><span>K</span><span>n</span><span>o</span><span>o</span><span>o</span></span>
+   </button>
+   <div className="rail-navigation">
+    <nav className="nav-group" aria-label="工作台">{nav.slice(0,5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
+    <nav className="nav-group system" aria-label="应用">{nav.slice(5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
+   </div>
+   {!narrow && <div className="rail-footer">
+    <div className="rail-bottom">{about?.demo && <div><span className="connection-dot"/><span>演示工作区</span></div>}<button type="button" aria-label={`关于 Knooo，${appVersion}`} onClick={()=>navigate('about')}>{appVersion}</button></div>
+    <div className="nav-group rail-controls">
+     <button ref={navToggle} type="button" className="nav-item" aria-controls="navigation" aria-expanded={!navCollapsed}
+      aria-label={navToggleLabel} onClick={()=>setNavCollapsed(value=>!value)}>
+      <NavToggleIcon size={18} strokeWidth={1.75}/>
+     </button>
+    </div>
+   </div>}
    {!narrow && !navCollapsed && <PanelGrip side="left" width={displayLeft} min={leftBounds.min} max={maxLeft} onResize={setLeftWidth} onToggle={()=>{setNavCollapsed(true);navToggle.current?.focus();}}/>}
   </aside>
   <div className="workbench">
    <header className="topbar">
-    <div className="topbar-location">{!narrow && <button ref={navToggle} className="icon-button" aria-controls="navigation" aria-expanded={!navCollapsed} aria-label={navCollapsed ? '展开导航栏' : '收起导航栏'} title={navCollapsed ? '展开导航栏' : '收起导航栏'} onClick={()=>setNavCollapsed(!navCollapsed)}>{navCollapsed ? <PanelLeftOpen size={18}/> : <PanelLeftClose size={18}/>}</button>}<div className="crumb"><current.icon size={17} strokeWidth={1.75}/><span>{current.label}</span></div></div>
+    <div className="crumb"><current.icon size={17} strokeWidth={1.75}/><span>{current.label}</span></div>
     <form className="global-search" onSubmit={search}><Search size={16}/><input ref={searchBox} value={query} onChange={e=>setQuery(e.target.value)} aria-label="搜索会话原文或路径" placeholder="搜索会话原文或路径"/><kbd>Ctrl K</kbd></form>
     {focus && page !== 'settings' && <button ref={readerToggle} className="icon-button restore-reader" aria-controls="session-reader" aria-expanded={showReader} aria-label={showReader ? '收起阅读器' : '展开阅读器'} title={showReader ? '收起阅读器' : '展开阅读器'} onClick={()=>setReaderCollapsed(!readerCollapsed)}>{showReader ? <PanelRightClose size={18}/> : <PanelRightOpen size={18}/>}</button>}
     {about && update?.available && <UpdateButton update={update} activity={updateActivity} repository={about.repository} onInstall={()=>void installUpdate()}/>}
+    {windowPinned !== undefined && <button type="button" className="icon-button window-pin" aria-label="窗口置顶" aria-pressed={windowPinned}
+     aria-disabled={pinPending} title={windowPinned ? '取消窗口置顶' : '窗口置顶'} onClick={()=>void toggleWindowPin()}>
+     <Pin aria-hidden="true" size={17} strokeWidth={1.75}/>
+    </button>}
    </header>
    <main className="workspace" id="workspace" data-page={page}>
     {error && <div className="feedback error" role="alert">{error}<button className="icon-button" aria-label="收起提示" onClick={()=>setError('')}><X size={16}/></button></div>}

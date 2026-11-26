@@ -12,7 +12,7 @@ func TestDesktopStartupRequiresLocalCapabilityAndInstalledWorkspace(t *testing.T
 	const addr = "127.0.0.1:43170"
 	const token = "desktop-launch-capability"
 	a := &app{demo: true}
-	handler := a.Handler(addr, token, http.NotFoundHandler(), "", "", nil)
+	handler := a.Handler(addr, token, http.NotFoundHandler(), "", "", nil, nil)
 	request := func(method, body, auth, origin string, want int) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, "http://"+addr+"/api/desktop-startup", strings.NewReader(body))

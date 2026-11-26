@@ -104,7 +104,7 @@ func run(defaultAddress, listen, data string, noOpen, demo, tray bool) error {
 	shutdown := sync.OnceFunc(func() { close(stop) })
 	updates := update.Handler(version, !demo, canInstall, shutdown)
 	server := &http.Server{
-		Handler:           a.Handler(addr, token, http.FileServer(http.FS(ui)), version, string(changelog), updates),
+		Handler:           a.Handler(addr, token, http.FileServer(http.FS(ui)), version, string(changelog), updates, desktop.topmost),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

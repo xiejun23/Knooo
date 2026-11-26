@@ -21,6 +21,8 @@ func newDesktopHost(_, tray bool) (*desktopHost, error) {
 
 func (*desktopHost) close() {}
 
+func (*desktopHost) topmost(*bool) (bool, bool, error) { return false, false, nil }
+
 func showDesktopError(error) {}
 
 func attachHeadlessConsole() {}

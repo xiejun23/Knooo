@@ -37,7 +37,7 @@ func TestPlatformLogsPersistReviewRejection(t *testing.T) {
 	}
 	reopened := openReviewTestApp(t, data, item)
 	const addr = "127.0.0.1:48763"
-	handler := reopened.Handler(addr, "test-token", http.NotFoundHandler(), "", "", nil)
+	handler := reopened.Handler(addr, "test-token", http.NotFoundHandler(), "", "", nil, nil)
 	request := func(query, token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "http://"+addr+"/api/logs"+query, nil)
 		if token != "" {

@@ -144,11 +144,13 @@ func decode(w http.ResponseWriter, r *http.Request, value any) bool {
 	return true
 }
 
-func (a *app) Handler(addr, token string, ui http.Handler, version, changelog string, updates http.Handler) http.Handler {
+func (a *app) Handler(addr, token string, ui http.Handler, version, changelog string, updates http.Handler, topmost func(*bool) (bool, bool, error)) http.Handler {
 	mux := http.NewServeMux()
 	if updates != nil {
 		mux.Handle("/api/update", updates)
 	}
+	mux.HandleFunc("GET /api/desktop-topmost", desktopTopmost(topmost))
+	mux.HandleFunc("POST /api/desktop-topmost", desktopTopmost(topmost))
 	mux.Handle("/", a.routes(ui, version, changelog))
 	return localOnly(addr, token, mux)
 }
