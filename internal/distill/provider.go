@@ -22,6 +22,7 @@ const (
 )
 
 var geminiModelID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var errOutputLimit = errors.New("模型回复达到输出上限，请提高连接的提炼输出上限或换用其他模型")
 
 // TestModel checks that the configured model can produce text without session data.
 func TestModel(ctx context.Context, config Config) error {
@@ -330,7 +331,7 @@ func responseText(provider string, data []byte) (string, error) {
 		}
 		choice := response.Choices[0]
 		if choice.FinishReason == "length" {
-			return "", errors.New("模型回复达到输出上限，请提高连接的提炼输出上限或换用其他模型")
+			return "", errOutputLimit
 		}
 		if (choice.FinishReason != "" && choice.FinishReason != "stop") || choice.Message.Refusal != "" {
 			return "", incomplete
@@ -338,7 +339,7 @@ func responseText(provider string, data []byte) (string, error) {
 		text.WriteString(choice.Message.Content)
 	case "responses", "gateway-responses":
 		if response.Status == "incomplete" && response.Incomplete.Reason == "max_output_tokens" {
-			return "", errors.New("模型回复达到输出上限，请提高连接的提炼输出上限或换用其他模型")
+			return "", errOutputLimit
 		}
 		if response.Status != "completed" {
 			return "", incomplete
@@ -357,7 +358,7 @@ func responseText(provider string, data []byte) (string, error) {
 		switch response.StopReason {
 		case "", "end_turn", "stop_sequence":
 		case "max_tokens":
-			return "", errors.New("模型回复达到输出上限，请提高连接的提炼输出上限或换用其他模型")
+			return "", errOutputLimit
 		default:
 			return "", incomplete
 		}
@@ -372,7 +373,7 @@ func responseText(provider string, data []byte) (string, error) {
 		}
 		candidate := response.Candidates[0]
 		if candidate.FinishReason == "MAX_TOKENS" {
-			return "", errors.New("模型回复达到输出上限，请提高连接的提炼输出上限或换用其他模型")
+			return "", errOutputLimit
 		}
 		if candidate.FinishReason != "" && candidate.FinishReason != "STOP" {
 			return "", incomplete

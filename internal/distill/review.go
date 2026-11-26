@@ -79,11 +79,9 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 	if err != nil {
 		return err
 	}
-	// Keep each automatic review batch compact so huge stored budgets don't trigger provider timeouts.
+	// Keep review inputs compact even when the connection allows very long transcripts.
 	const maxReviewBatchInput = 32000
-	const maxReviewBatchOutput = 8192
 	input = min(input, maxReviewBatchInput)
-	output = min(output, maxReviewBatchOutput)
 	batchConfig := config
 	batchConfig.InputBudget, batchConfig.OutputBudget = input, output
 	input, output, err = fitBudgets(config, model, input, output)
@@ -145,6 +143,7 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 		reduced = append(reduced, message)
 		sizes = append(sizes, len(raw)+1)
 	}
+	maxBatchMessages := len(reduced)
 	for start < len(reduced) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -173,7 +172,7 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 		overlap := reviewBoundaryContext(messages, boundary, carriedID, min(limit/5, 900, contextBudget-len(previous)))
 		prompt := reviewInstructions + overlap + previous
 		used += len(overlap) + len(previous)
-		for end < len(reduced) {
+		for end < len(reduced) && end-start < maxBatchMessages {
 			if reduced[end].Role == "user" {
 				if questions == maxQuestions {
 					break
@@ -204,6 +203,19 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 			return err
 		}
 		response, err := requestText(ctx, batchConfig, prompt, plan.transcript, plan.OutputBudget, nil)
+		if errors.Is(err, errOutputLimit) {
+			if end-start == 1 {
+				return fmt.Errorf("模型回复达到输出上限（已缩至单条新增消息，请求上限 %d token），请检查提炼输出上限与推理强度，或换用其他模型", plan.TotalOutputBudget)
+			}
+			maxBatchMessages = (end - start) / 2
+			for split := start + maxBatchMessages; split > start; split-- {
+				if reduced[split].Role == "user" {
+					maxBatchMessages = split - start
+					break
+				}
+			}
+			continue
+		}
 		if err != nil {
 			return err
 		}

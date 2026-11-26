@@ -438,6 +438,89 @@ func TestReviewKeepsNewMessagesWhenResumingWithSmallBudget(t *testing.T) {
 	}
 }
 
+func TestReviewHonorsOutputBudgetAndSplitsTruncatedBatch(t *testing.T) {
+	messages := []Input{
+		{ID: "u1", Role: "user", Text: "请检查缓存。"},
+		{ID: "a1", Role: "assistant", Text: "缓存检查完成。"},
+		{ID: "u2", Role: "user", Text: "请检查排序。"},
+		{ID: "a2", Role: "assistant", Text: "排序检查完成。"},
+	}
+	for _, test := range []struct {
+		name              string
+		modelLimit        int
+		wantBudget        int
+		truncateFirstTurn bool
+	}{
+		{name: "connection limit", wantBudget: MaxOutputBudget},
+		{name: "model limit", modelLimit: 16000, wantBudget: 16000},
+		{name: "still truncated with one new message", wantBudget: MaxOutputBudget, truncateFirstTurn: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := make(chan []string, 8)
+			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					MaxTokens int `json:"max_tokens"`
+					Messages  []struct{ Content string }
+				}
+				var batch []Input
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Messages) != 2 ||
+					json.Unmarshal([]byte(body.Messages[1].Content), &batch) != nil {
+					t.Error("invalid review request")
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if body.MaxTokens != test.wantBudget {
+					t.Errorf("requested max_tokens = %d, want %d", body.MaxTokens, test.wantBudget)
+				}
+				ids := make([]string, 0, len(batch))
+				for _, message := range batch {
+					ids = append(ids, message.ID)
+				}
+				select {
+				case requests <- ids:
+				default:
+					t.Error("too many review requests")
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if len(batch) > 2 || (test.truncateFirstTurn && slices.Contains(ids, "a1")) {
+					io.WriteString(w, `{"choices":[{"finish_reason":"length","message":{"content":"{\"topics\":["}}]}`)
+					return
+				}
+				io.WriteString(w, `{"choices":[{"finish_reason":"stop","message":{"content":"{\"topics\":[]}"}}]}`)
+			}))
+			config := Config{Provider: "gateway", Model: "review-test", BaseURL: gateway.URL, OutputBudget: MaxOutputBudget}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var checkpoints []int
+			err := Review(ctx, config, Model{MaxOutputTokens: test.modelLimit}, messages, 0, nil, func(consumed int, _ []Topic) error {
+				checkpoints = append(checkpoints, consumed)
+				return nil
+			})
+			gateway.Close()
+			close(requests)
+			var batches [][]string
+			for ids := range requests {
+				batches = append(batches, ids)
+			}
+			wantBatches := [][]string{{"u1", "a1", "u2", "a2"}, {"u1", "a1"}, {"u2", "a2"}}
+			wantCheckpoints := []int{2, 4}
+			if test.truncateFirstTurn {
+				wantBatches = [][]string{{"u1", "a1", "u2", "a2"}, {"u1", "a1"}, {"u1"}, {"u1", "a1"}}
+				wantCheckpoints = []int{1}
+				if err == nil || !strings.Contains(err.Error(), "请求上限 32768 token") {
+					t.Errorf("expected the effective budget in the truncation error, got %v", err)
+				}
+			} else if err != nil {
+				t.Errorf("expected split batches to succeed, got %v", err)
+			}
+			if !reflect.DeepEqual(batches, wantBatches) || !slices.Equal(checkpoints, wantCheckpoints) {
+				t.Fatalf("batches=%v, checkpoints=%v, err=%v", batches, checkpoints, err)
+			}
+		})
+	}
+}
+
 func TestReasoningEffortPayloads(t *testing.T) {
 	tests := []struct {
 		name     string
