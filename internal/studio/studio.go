@@ -220,6 +220,8 @@ func (a *app) routes(ui http.Handler, version, changelog string) http.Handler {
 	mux.HandleFunc("GET /api/logs", a.platformLogs)
 	mux.HandleFunc("GET /api/review-settings", a.getReviewModel)
 	mux.HandleFunc("POST /api/review-settings", a.setReviewModel)
+	mux.HandleFunc("GET /api/desktop-startup", a.desktopStartup)
+	mux.HandleFunc("POST /api/desktop-startup", a.desktopStartup)
 	return mux
 }
 

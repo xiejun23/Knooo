@@ -119,7 +119,71 @@ export function SettingsWorkspace({ connections, api, onChange, demo }: {
    loadError={reviewLoadError}
    onSavedChange={(id, days) => { setReviewConnectionId(id); setReviewMaxAgeDays(days); setReviewWindowError(''); }}
   />}
+  {!editing && !demo && <DesktopStartupSettings api={api}/>}
  </div>;
+}
+
+type DesktopStartupState = 'unavailable' | 'off' | 'on' | 'blocked';
+
+function readDesktopStartupState(response: unknown): DesktopStartupState {
+ if (response !== null && typeof response === 'object' && 'state' in response) {
+  const { state } = response;
+  if (state === 'unavailable' || state === 'off' || state === 'on' || state === 'blocked') return state;
+ }
+ throw new Error('无法读取登录启动设置。');
+}
+
+function DesktopStartupSettings({ api }: { api: API }) {
+ const [state, setState] = useState<DesktopStartupState>();
+ const [error, setError] = useState('');
+ const [saving, setSaving] = useState(false);
+
+ useEffect(() => {
+  const controller = new AbortController();
+  api<unknown>('desktop-startup', undefined, controller.signal).then(readDesktopStartupState).then(value => {
+   if (!controller.signal.aborted) setState(value);
+  }).catch(err => {
+   if (!controller.signal.aborted) setError(err instanceof Error ? err.message : String(err));
+  });
+  return () => controller.abort();
+ }, [api]);
+
+ if (state === 'unavailable' || (state === undefined && !error)) return null;
+ const enabled = state === 'on' || state === 'blocked';
+
+ async function toggle() {
+  setSaving(true);
+  setError('');
+  try {
+   const response = await api<unknown>('desktop-startup', { enabled: !enabled });
+   setState(readDesktopStartupState(response));
+  } catch (err) {
+   setError(err instanceof Error ? err.message : String(err));
+  } finally {
+   setSaving(false);
+  }
+ }
+
+ return <section className="settings-box desktop-startup">
+  <div className="desktop-startup-row">
+   <div>
+    <h2 id="desktop-startup-title">登录 Windows 时启动 Knooo</h2>
+    <p id="desktop-startup-description">登录后在系统托盘运行</p>
+   </div>
+   {state !== undefined && <button
+    type="button"
+    role="switch"
+    aria-checked={enabled}
+    aria-labelledby="desktop-startup-title"
+    aria-describedby={state === 'blocked' ? 'desktop-startup-description desktop-startup-blocked' : 'desktop-startup-description'}
+    className="provider-switch"
+    disabled={saving}
+    onClick={() => void toggle()}
+   />}
+  </div>
+  {state === 'blocked' && <p id="desktop-startup-blocked" role="status">Windows 已禁用此启动项，可在系统的「启动应用」设置中启用。</p>}
+  {error && <p className="inline-error" role="alert">{error}</p>}
+ </section>;
 }
 
 const reviewScopeOptions = [

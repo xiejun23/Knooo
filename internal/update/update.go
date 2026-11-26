@@ -70,7 +70,7 @@ func Handler(version string, enabled, canInstall bool, shutdown func()) http.Han
 			return nil
 		}},
 	}
-	if enabled && canInstall && installed() {
+	if enabled && canInstall && RegisteredExecutable() != "" {
 		s.install = launchInstaller
 	}
 	mux := http.NewServeMux()

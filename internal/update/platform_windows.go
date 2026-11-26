@@ -12,29 +12,33 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-func installed() bool {
+func RegisteredExecutable() string {
 	if runtime.GOARCH != "amd64" {
-		return false
+		return ""
 	}
 	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Uninstall\KnoooStudio`, registry.QUERY_VALUE)
 	if err != nil {
-		return false
+		return ""
 	}
 	defer key.Close()
 	dir, _, err := key.GetStringValue("InstallLocation")
 	if err != nil || !filepath.IsAbs(dir) {
-		return false
+		return ""
 	}
 	path, err := os.Executable()
 	if err != nil {
-		return false
+		return ""
 	}
 	current, err := os.Stat(path)
 	if err != nil {
-		return false
+		return ""
 	}
-	registered, err := os.Stat(filepath.Join(dir, "Knooo-Studio.exe"))
-	return err == nil && os.SameFile(current, registered)
+	registeredPath := filepath.Join(dir, "Knooo-Studio.exe")
+	registered, err := os.Stat(registeredPath)
+	if err != nil || !os.SameFile(current, registered) {
+		return ""
+	}
+	return registeredPath
 }
 
 func launchInstaller(path string) error {
