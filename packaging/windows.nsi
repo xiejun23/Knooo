@@ -7,6 +7,8 @@ Unicode true
   !define APP_VERSION "dev"
 !endif
 !define APP_NAME "Knooo"
+!define APP_EXE "Knooo.exe"
+!define LEGACY_EXE "Knooo-Studio.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\KnoooStudio"
 !define RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
 !define WEBVIEW2_KEY "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
@@ -44,13 +46,18 @@ Function .onInit
     Return
   ${EndIf}
   ReadRegStr $1 HKCU "${UNINSTALL_KEY}" "InstallLocation"
-  ${If} $UpdatePID <= 0
-  ${OrIf} $1 == ""
-  ${OrIfNot} ${FileExists} "$1\Knooo-Studio.exe"
-    MessageBox MB_ICONSTOP "Knooo installation could not be found. Run Setup manually." /SD IDOK
-    SetErrorLevel 1
-    Abort
+  ${If} $UpdatePID > 0
+  ${AndIf} $1 != ""
+    ${If} ${FileExists} "$1\${APP_EXE}"
+    ${OrIf} ${FileExists} "$1\${LEGACY_EXE}"
+      Goto wait_for_update
+    ${EndIf}
   ${EndIf}
+  MessageBox MB_ICONSTOP "Knooo installation could not be found. Run Setup manually." /SD IDOK
+  SetErrorLevel 1
+  Abort
+
+wait_for_update:
   StrCpy $INSTDIR "$1"
 
   System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $UpdatePID) p .r0 ?e'
@@ -114,22 +121,69 @@ FunctionEnd
 Section "Install"
   SetShellVarContext current
   Call EnsureWebView2
+  StrCpy $1 ""
+  ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  ${If} $0 != ""
+  ${AndIf} ${FileExists} "$0\${LEGACY_EXE}"
+    GetFullPathName $1 "$0\${LEGACY_EXE}"
+    GetFullPathName $0 "$INSTDIR\${LEGACY_EXE}"
+    ${If} $1 != $0
+      MessageBox MB_ICONSTOP "To upgrade Knooo, select its current install folder. To move it, uninstall Knooo first." /SD IDOK
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+  ${EndIf}
+
+  StrCpy $2 ""
+  ${If} ${FileExists} "$INSTDIR\${APP_EXE}"
+    StrCpy $2 "present"
+  ${EndIf}
   SetOutPath "$INSTDIR"
   SetOverwrite try
   ClearErrors
-  File /oname=Knooo-Studio.exe "..\build\Knooo-windows-x64.exe"
+  File /oname=${APP_EXE} "..\build\Knooo-windows-x64.exe"
   ${If} ${Errors}
     MessageBox MB_ICONSTOP "Could not write ${APP_NAME}. Close any running copy and try again." /SD IDOK
     SetErrorLevel 1
     Abort
   ${EndIf}
 
+  ${If} $1 != ""
+    ReadRegStr $0 HKCU "${RUN_KEY}" "KnoooStudio"
+    ${If} $0 == '"$1" --tray'
+      ClearErrors
+      WriteRegStr HKCU "${RUN_KEY}" "KnoooStudio" '"$INSTDIR\${APP_EXE}" --tray'
+      ${If} ${Errors}
+        ${If} $2 == ""
+          Delete "$INSTDIR\${APP_EXE}"
+        ${EndIf}
+        MessageBox MB_ICONSTOP "Could not update the Knooo login startup entry." /SD IDOK
+        SetErrorLevel 1
+        Abort
+      ${EndIf}
+    ${EndIf}
+
+    ClearErrors
+    Delete "$1"
+    ${If} ${Errors}
+      ${If} $0 == '"$1" --tray'
+        WriteRegStr HKCU "${RUN_KEY}" "KnoooStudio" "$0"
+      ${EndIf}
+      ${If} $2 == ""
+        Delete "$INSTDIR\${APP_EXE}"
+      ${EndIf}
+      MessageBox MB_ICONSTOP "Quit ${APP_NAME} from the system tray before upgrading." /SD IDOK
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+  ${EndIf}
+
   WriteUninstaller "$INSTDIR\Uninstall.exe"
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\Knooo-Studio.exe"
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
   Delete "$SMPROGRAMS\Knooo Studio.lnk"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION}"
-  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\Knooo-Studio.exe"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoModify" 1
@@ -141,14 +195,14 @@ SectionEnd
 
 Function .onInstSuccess
   ${If} $UpdatePID != ""
-    Exec '"$INSTDIR\Knooo-Studio.exe"'
+    Exec '"$INSTDIR\${APP_EXE}"'
   ${EndIf}
 FunctionEnd
 
 Section "Uninstall"
   SetShellVarContext current
   ClearErrors
-  Delete "$INSTDIR\Knooo-Studio.exe"
+  Delete "$INSTDIR\${APP_EXE}"
   ${If} ${Errors}
     MessageBox MB_ICONSTOP "Quit ${APP_NAME} from the system tray before uninstalling." /SD IDOK
     SetErrorLevel 1

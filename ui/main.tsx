@@ -315,7 +315,7 @@ function App() {
    <button className="brand" aria-label="Knooo 首页" title="Knooo" onClick={()=>navigate('review')}><EagleMark/><span>Knooo</span></button>
    <nav className="nav-group" aria-label="工作台">{nav.slice(0,5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
    <nav className="nav-group system" aria-label="应用">{nav.slice(5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
-   <div className="rail-bottom">{about?.demo && <div><span className="connection-dot"/><span>演示工作区</span></div>}<button onClick={()=>navigate('about')}>v{about?.version ?? '0.1.0'} <ArrowUpRight size={13}/></button></div>
+   <div className="rail-bottom">{about?.demo && <div><span className="connection-dot"/><span>演示工作区</span></div>}<button onClick={()=>navigate('about')}>v{about?.version ?? '0.1.1'} <ArrowUpRight size={13}/></button></div>
    {!narrow && !navCollapsed && <PanelGrip side="left" width={displayLeft} min={leftBounds.min} max={maxLeft} onResize={setLeftWidth} onToggle={()=>{setNavCollapsed(true);navToggle.current?.focus();}}/>}
   </aside>
   <div className="workbench">

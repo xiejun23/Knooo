@@ -221,8 +221,11 @@ type desktopWindow struct {
 	trayPresent    bool
 	visible        bool
 	controller     *webViewObject
+	memoryView     *webViewObject
+	webViewStarted bool
 	webViewError   error
 	origin         string
+	data           string
 	url            string
 }
 
@@ -254,7 +257,7 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 	cursor, _, _ := loadCursor.Call(0, 32512)
 	taskbarMessage := windows.StringToUTF16Ptr("TaskbarCreated")
 	taskbarCreated, _, _ := registerMessage.Call(uintptr(unsafe.Pointer(taskbarMessage)))
-	window := &desktopWindow{taskbarCreated: uint32(taskbarCreated), visible: !h.startHidden, url: url}
+	window := &desktopWindow{taskbarCreated: uint32(taskbarCreated), data: data, url: url}
 	class := windowClass{
 		proc:     windows.NewCallback(window.message),
 		instance: module, icon: icon, cursor: cursor, background: 6,
@@ -283,7 +286,7 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 	copy(window.tray.tip[:], windows.StringToUTF16("Knooo"))
 	window.addTrayIcon()
 	defer shellNotifyIcon.Call(notifyDelete, uintptr(unsafe.Pointer(&window.tray)))
-	if window.visible || !window.trayPresent {
+	if !h.startHidden || !window.trayPresent {
 		window.show()
 	}
 
@@ -296,7 +299,7 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 			postMessage.Call(hwnd, wmExitDesktop, 0, 0)
 		}
 	}()
-	return window.runWebView(data)
+	return window.runMessageLoop()
 }
 
 func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
@@ -318,12 +321,13 @@ func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uin
 		if w.trayPresent {
 			w.visible = false
 			showWindow.Call(hwnd, windows.SW_HIDE)
+			w.setWebViewMemoryTarget()
 		} else {
 			postQuitMessage.Call(0)
 		}
 		return 0
 	case wmTimer:
-		if wParam == webViewStartupTimer && w.controller == nil {
+		if wParam == webViewStartupTimer && w.webViewStarted && w.controller == nil {
 			w.failWebView(errors.New("启动 WebView2 超时。请检查 Microsoft Edge WebView2 Runtime。"))
 		}
 		return 0
@@ -367,13 +371,22 @@ func (w *desktopWindow) resize() {
 }
 
 func (w *desktopWindow) show() {
+	wasVisible := w.visible
 	w.visible = true
+	if !wasVisible {
+		w.setWebViewMemoryTarget()
+	}
 	command := uintptr(windows.SW_SHOW)
 	if iconic, _, _ := isIconic.Call(w.hwnd); iconic != 0 {
 		command = windows.SW_RESTORE
 	}
 	showWindow.Call(w.hwnd, command)
 	setForeground.Call(w.hwnd)
+	if !w.webViewStarted {
+		if err := w.startWebView(); err != nil {
+			w.failWebView(err)
+		}
+	}
 }
 
 func (w *desktopWindow) addTrayIcon() {

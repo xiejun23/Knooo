@@ -2,12 +2,15 @@ package sessions
 
 import (
 	"bytes"
+	"encoding/gob"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestIncrementalRefresh(t *testing.T) {
@@ -217,6 +220,47 @@ func TestDiskCacheRetriesFailedWrite(t *testing.T) {
 	scanClean(t, store, nil)
 	if info := cacheFileInfo(t, cacheFile); !info.Mode().IsRegular() {
 		t.Fatal("cache write was not retried")
+	}
+}
+
+func TestDiskCacheMigratesLegacyEntries(t *testing.T) {
+	store, home := isolatedStore(t)
+	src := source{agent: "codex", path: filepath.Join(home, ".codex", "sessions", "rollout-legacy-cache.jsonl")}
+	putFile(t, src.path, []byte(`{"type":"session_meta","payload":{"id":"legacy-cache"}}`+"\n"+
+		`{"type":"event_msg","payload":{"type":"user_message","message":"Legacy cached turn."}}`+"\n"))
+	want := scanClean(t, store, nil)
+	file := store.files[src]
+	cacheFile := filepath.Join(t.TempDir(), "cache.zst")
+	var buf bytes.Buffer
+	enc, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := struct {
+		Version int
+		Entries []diskCacheEntry
+	}{2, []diskCacheEntry{{
+		Agent: src.agent, Path: src.path, Size: file.info.Size(), MtimeUnix: file.info.ModTime().UnixNano(),
+		Session: file.parsed.session, Updated: file.parsed.updated,
+	}}}
+	if err := gob.NewEncoder(enc).Encode(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	putFile(t, cacheFile, buf.Bytes())
+
+	for _, phase := range []string{"legacy migration", "streamed reload"} {
+		cold := New(home)
+		cold.SetCachePath(cacheFile)
+		cold.ensureDiskCacheLoaded()
+		if cold.diskDirty != (phase == "legacy migration") || len(cold.disk) != 1 {
+			t.Fatalf("%s: diskDirty=%t, entries=%d", phase, cold.diskDirty, len(cold.disk))
+		}
+		if got := scanClean(t, cold, nil); !reflect.DeepEqual(got, want) || cold.files[src].records != nil {
+			t.Fatalf("%s did not reuse the persisted session", phase)
+		}
 	}
 }
 

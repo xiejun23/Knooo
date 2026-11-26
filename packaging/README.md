@@ -8,9 +8,11 @@
 
 安装版和便携版使用同一个 EXE，内嵌前端资源、Go 服务和本地数据库引擎。运行需要 Windows x64 和 Microsoft Edge WebView2 Runtime。检测到运行时缺失时，安装包从微软下载并验证签名后安装。便携版用户可从 [Microsoft 下载 WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/#download-section)。
 
-Knooo 启动时打开独立窗口。关闭窗口后，应用留在系统托盘，工作回顾继续运行。双击托盘图标可恢复窗口，右键选择「退出 Knooo」可关闭应用。安装版可在「本机设置」开启「登录 Windows 时启动 Knooo」，默认关闭。开启后，Windows 登录时 Knooo 在托盘运行。
+从开始菜单启动会打开 Knooo 窗口。关闭窗口后，应用留在系统托盘，工作回顾继续运行。双击托盘图标可恢复窗口，右键选择「退出 Knooo」可关闭应用。安装版可在「本机设置」开启「登录 Windows 时启动 Knooo」，默认关闭。开启后，Knooo 在 Windows 登录时进入托盘，首次打开窗口时加载 WebView2。
 
 应用默认把数据保存在 `%APPDATA%\Knooo`。卸载前请从系统托盘退出 Knooo。卸载移除程序、快捷方式和登录启动项，保留数据目录。
+
+覆盖安装 v0.1.0 时，沿用原安装目录。安装器会将 `Knooo-Studio.exe` 替换为 `Knooo.exe`，并迁移已有的登录启动项。
 
 应用按内置配置监听 `127.0.0.1:48763`，端口被占用时自动使用空闲的本机端口。从源码调试时可用 `go run . -no-open` 在终端查看地址。Linux 开发预览使用 `xdg-open`，WSL 优先调用 Windows 默认浏览器。
 
@@ -25,7 +27,7 @@ npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
 npm run build
 go test ./...
 
-version=0.1.0
+version=0.1.1
 mkdir -p build
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false \
   -ldflags "-H=windowsgui -X main.version=$version" -o build/Knooo-windows-x64.exe .

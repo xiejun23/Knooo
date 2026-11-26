@@ -19,8 +19,9 @@ import (
 const webViewStartupTimer = 1
 
 var (
-	setTimer  = user32.NewProc("SetTimer")
-	killTimer = user32.NewProc("KillTimer")
+	setTimer         = user32.NewProc("SetTimer")
+	killTimer        = user32.NewProc("KillTimer")
+	webViewMemoryIID = windows.GUID{Data1: 0x6921f954, Data2: 0x79b0, Data3: 0x437f, Data4: [8]byte{0xa9, 0x97, 0xc8, 0x58, 0x11, 0x89, 0x7c, 0x68}}
 )
 
 type controllerCompleted interface {
@@ -60,21 +61,33 @@ func init() {
 	)
 }
 
-func (w *desktopWindow) runWebView(data string) error {
+func (w *desktopWindow) startWebView() error {
+	w.webViewStarted = true
 	page, err := url.Parse(w.url)
 	if err != nil {
 		return err
 	}
 	w.origin = page.Scheme + "://" + page.Host
-	profile, err := filepath.Abs(filepath.Join(data, "WebView2"))
+	profile, err := filepath.Abs(filepath.Join(w.data, "WebView2"))
 	if err != nil {
 		return err
 	}
 	if timer, _, err := setTimer.Call(w.hwnd, webViewStartupTimer, 30_000, 0); timer == 0 {
 		return fmt.Errorf("设置 WebView2 启动超时：%w", err)
 	}
+	if err := webviewloader.CreateCoreWebView2EnvironmentWithOptions(w, webviewloader.WithUserDataFolder(profile)); err != nil {
+		return fmt.Errorf("无法启动 Microsoft Edge WebView2。请检查 WebView2 Runtime 是否已安装：%w", err)
+	}
+	return nil
+}
+
+func (w *desktopWindow) runMessageLoop() error {
 	defer killTimer.Call(w.hwnd, webViewStartupTimer)
 	defer func() {
+		if w.memoryView != nil {
+			w.memoryView.call(comRelease)
+			w.memoryView = nil
+		}
 		if w.controller != nil {
 			w.controller.call(controllerClose)
 			w.controller.call(comRelease)
@@ -82,10 +95,6 @@ func (w *desktopWindow) runWebView(data string) error {
 		}
 	}()
 
-	err = webviewloader.CreateCoreWebView2EnvironmentWithOptions(w, webviewloader.WithUserDataFolder(profile))
-	if err != nil {
-		return fmt.Errorf("无法启动 Microsoft Edge WebView2。请检查 WebView2 Runtime 是否已安装：%w", err)
-	}
 	for {
 		var message windowMessage
 		result, _, err := getMessage.Call(uintptr(unsafe.Pointer(&message)), 0, 0, 0)
@@ -142,6 +151,10 @@ func (w *desktopWindow) configureWebView() error {
 	}
 	defer view.call(comRelease)
 
+	// Older runtimes can still display the window without this optional interface.
+	view.call(comQueryInterface, uintptr(unsafe.Pointer(&webViewMemoryIID)), uintptr(unsafe.Pointer(&w.memoryView)))
+	w.setWebViewMemoryTarget()
+
 	var settings *webViewObject
 	if result := view.call(viewGetSettings, uintptr(unsafe.Pointer(&settings))); int32(result) < 0 {
 		return webViewResult(result)
@@ -178,6 +191,19 @@ func (w *desktopWindow) configureWebView() error {
 		return err
 	}
 	return webViewResult(view.call(viewNavigate, uintptr(unsafe.Pointer(target))))
+}
+
+func (w *desktopWindow) setWebViewMemoryTarget() {
+	if w.memoryView == nil {
+		return
+	}
+	target := uintptr(memoryTargetNormal)
+	if !w.visible {
+		target = memoryTargetLow
+	}
+	if err := webViewResult(w.memoryView.call(viewSetMemoryTarget, target)); err != nil {
+		log.Printf("调整 WebView2 内存目标：%v", err)
+	}
 }
 
 func (w *desktopWindow) navigationStarting(args *webViewObject) uintptr {
@@ -242,8 +268,9 @@ func openInDefaultBrowser(uri string) error {
 // WebView2 vtable slots from the Win32 SDK's webview2.idl. Importing the
 // generated bindings initializes unused Go callbacks with unsupported parameter sizes.
 const (
-	comAddRef  = 1
-	comRelease = 2
+	comQueryInterface = 0
+	comAddRef         = 1
+	comRelease        = 2
 
 	environmentCreateController = 3
 
@@ -257,6 +284,10 @@ const (
 	viewAddNavigation      = 7
 	viewAddFrameNavigation = 17
 	viewAddNewWindow       = 44
+	viewSetMemoryTarget    = 120 // ICoreWebView2_19::put_MemoryUsageTargetLevel
+
+	memoryTargetNormal = 0
+	memoryTargetLow    = 1
 
 	settingsSetWebMessage  = 6
 	settingsSetDevTools    = 12
@@ -271,7 +302,7 @@ const (
 )
 
 type webViewObject struct {
-	vtable *[viewAddNewWindow + 1]uintptr
+	vtable *[viewSetMemoryTarget + 1]uintptr
 }
 
 //go:uintptrescapes

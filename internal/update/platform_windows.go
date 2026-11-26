@@ -33,7 +33,7 @@ func RegisteredExecutable() string {
 	if err != nil {
 		return ""
 	}
-	registeredPath := filepath.Join(dir, "Knooo-Studio.exe")
+	registeredPath := filepath.Join(dir, "Knooo.exe")
 	registered, err := os.Stat(registeredPath)
 	if err != nil || !os.SameFile(current, registered) {
 		return ""

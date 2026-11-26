@@ -70,7 +70,8 @@ jobs:
         run: |
           $setup = Join-Path $PWD 'Knooo-Setup-windows-x64.exe'
           $target = Join-Path $env:RUNNER_TEMP 'Knooo Smoke'
-          $installed = Join-Path $target 'Knooo-Studio.exe'
+          $installed = Join-Path $target 'Knooo.exe'
+          $legacy = Join-Path $target 'Knooo-Studio.exe'
           $uninstaller = Join-Path $target 'Uninstall.exe'
           $expected = (Get-FileHash 'Knooo-windows-x64.exe').Hash
           $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\KnoooStudio'
@@ -87,23 +88,35 @@ jobs:
               (Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue).KnoooStudio) {
             throw 'The uninstaller is missing or startup was enabled by default'
           }
-          $startup = '"{0}" --tray' -f $installed
           if (!(Test-Path $runKey)) { New-Item -Path $runKey | Out-Null }
-          Set-ItemProperty -Path $runKey -Name KnoooStudio -Value $startup
+          $startup = '"{0}" --tray' -f $installed
+          $legacyStartup = '"{0}" --tray' -f $legacy
 
-          Add-Content -LiteralPath $installed -Value 'previous installation marker'
+          Move-Item -LiteralPath $installed -Destination $legacy
+          Set-ItemProperty -Path $runKey -Name KnoooStudio -Value $legacyStartup
+          $manual = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru -Wait
+          if ($manual.ExitCode -ne 0 -or (Test-Path -LiteralPath $legacy) -or
+              (Get-FileHash $installed).Hash -ne $expected -or
+              (Get-ItemPropertyValue -Path $runKey -Name KnoooStudio) -ne $startup) {
+            throw 'Manual upgrade did not migrate the old executable and startup command'
+          }
+
+          Move-Item -LiteralPath $installed -Destination $legacy
+          Add-Content -LiteralPath $legacy -Value 'previous installation marker'
+          Set-ItemProperty -Path $runKey -Name KnoooStudio -Value $legacyStartup
           $exiting = Start-Process -FilePath (Get-Command pwsh).Source `
             -ArgumentList '-NoProfile -Command "Start-Sleep -Seconds 5"' -PassThru
           $upgrade = Start-Process -FilePath $setup -ArgumentList "/S /UPDATEPID=$($exiting.Id)" -PassThru
-          if (!$upgrade.WaitForExit(60000) -or $upgrade.ExitCode -ne 0 -or (Get-FileHash $installed).Hash -ne $expected) {
-            throw 'The in-place update did not restore the release binary'
+          if (!$upgrade.WaitForExit(60000) -or $upgrade.ExitCode -ne 0 -or (Test-Path -LiteralPath $legacy) -or
+              (Get-FileHash $installed).Hash -ne $expected) {
+            throw 'The in-place update did not migrate the old executable'
           }
           if ((Get-ItemPropertyValue -Path $runKey -Name KnoooStudio) -ne $startup) {
             throw 'The in-place update changed the startup preference'
           }
           $deadline = (Get-Date).AddSeconds(15)
           do {
-            $app = Get-Process -Name 'Knooo-Studio' -ErrorAction SilentlyContinue |
+            $app = Get-Process -Name 'Knooo' -ErrorAction SilentlyContinue |
               Where-Object { $_.Path -eq $installed }
             if (!$app) { Start-Sleep -Milliseconds 250 }
           } until ($app -or (Get-Date) -ge $deadline)

@@ -100,6 +100,7 @@ func environmentCommand(name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, name, args...)
+	configureEnvironmentCommand(command)
 	command.WaitDelay = 250 * time.Millisecond
 	return command.Output()
 }
