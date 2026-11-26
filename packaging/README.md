@@ -3,12 +3,16 @@
 | GitHub Release 文件 | 用途 |
 | --- | --- |
 | `Knooo-Setup-windows-x64.exe` | 为当前 Windows 用户安装，默认目录为 `%LOCALAPPDATA%\Programs\Knooo`，也可自选目录。添加开始菜单快捷方式和卸载入口。 |
-| `Knooo-windows-x64.exe` | 直接双击运行的独立程序，也可在终端传入 `-no-open`。 |
+| `Knooo-windows-x64.exe` | 直接双击运行的便携版。 |
 | `SHA256SUMS.txt` | 两个 EXE 的 SHA-256。Windows PowerShell 可用 `Get-FileHash .\Knooo-windows-x64.exe` 核对。 |
 
-安装版和便携版使用同一个 EXE，内嵌前端资源、Go 服务和本地数据库引擎。运行需要 Windows x64 和系统默认浏览器。应用默认把数据保存在 `%APPDATA%\Knooo`，卸载保留该目录。
+安装版和便携版使用同一个 EXE，内嵌前端资源、Go 服务和本地数据库引擎。运行需要 Windows x64 和 Microsoft Edge WebView2 Runtime。检测到运行时缺失时，安装包从微软下载并验证签名后安装。便携版用户可从 [Microsoft 下载 WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/#download-section)。
 
-启动时，Knooo 按内置配置监听 `127.0.0.1:48763` 并通过 Windows Shell 打开默认浏览器。默认端口不可用时会自动使用空闲的本机端口。控制台显示本次启动地址。按 `Ctrl+C` 或关闭控制台即可停止服务。使用 `-no-open` 时，从控制台复制完整地址到浏览器。Linux 开发预览使用 `xdg-open`，WSL 优先调用 Windows 默认浏览器。
+Knooo 启动时打开独立窗口。关闭窗口后，应用留在系统托盘，工作回顾继续运行。双击托盘图标可恢复窗口，右键选择「退出 Knooo」可关闭应用。安装版可在「本机设置」开启「登录 Windows 时启动 Knooo」，默认关闭。开启后，Windows 登录时 Knooo 在托盘运行。
+
+应用默认把数据保存在 `%APPDATA%\Knooo`。卸载前请从系统托盘退出 Knooo。卸载移除程序、快捷方式和登录启动项，保留数据目录。
+
+应用按内置配置监听 `127.0.0.1:48763`，端口被占用时自动使用空闲的本机端口。从源码调试时可用 `go run . -no-open` 在终端查看地址。Linux 开发预览使用 `xdg-open`，WSL 优先调用 Windows 默认浏览器。
 
 ## 本地构建
 
@@ -24,7 +28,7 @@ go test ./...
 version=0.1.0
 mkdir -p build
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false \
-  -ldflags "-X main.version=$version" -o build/Knooo-windows-x64.exe .
+  -ldflags "-H=windowsgui -X main.version=$version" -o build/Knooo-windows-x64.exe .
 makensis -WX -DAPP_VERSION="$version" packaging/windows.nsi
 (cd build && sha256sum Knooo-windows-x64.exe Knooo-Setup-windows-x64.exe > SHA256SUMS.txt)
 ```

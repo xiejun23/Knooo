@@ -8,6 +8,9 @@ Unicode true
 !endif
 !define APP_NAME "Knooo"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\KnoooStudio"
+!define RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
+!define WEBVIEW2_KEY "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+!define WEBVIEW2_BOOTSTRAPPER "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 !define MUI_ICON "eagle.ico"
 !define MUI_UNICON "eagle.ico"
 
@@ -44,7 +47,7 @@ Function .onInit
   ${If} $UpdatePID <= 0
   ${OrIf} $1 == ""
   ${OrIfNot} ${FileExists} "$1\Knooo-Studio.exe"
-    MessageBox MB_ICONSTOP "Knooo installation could not be found. Run Setup manually."
+    MessageBox MB_ICONSTOP "Knooo installation could not be found. Run Setup manually." /SD IDOK
     SetErrorLevel 1
     Abort
   ${EndIf}
@@ -59,7 +62,7 @@ Function .onInit
     StrCpy $1 0
   ${EndIf}
   ${If} $1 <> 0
-    MessageBox MB_ICONSTOP "Knooo did not exit. Close it and run Setup again."
+    MessageBox MB_ICONSTOP "Knooo did not exit. Close it and run Setup again." /SD IDOK
     SetErrorLevel 1
     Abort
   ${EndIf}
@@ -71,8 +74,46 @@ Function SkipUpdateDirectory
   ${EndIf}
 FunctionEnd
 
+Function WebView2Version
+  ReadRegStr $0 HKLM "${WEBVIEW2_KEY}" "pv"
+  ${If} $0 == ""
+  ${OrIf} $0 == "0.0.0.0"
+    ReadRegStr $0 HKCU "${WEBVIEW2_KEY}" "pv"
+  ${EndIf}
+FunctionEnd
+
+Function EnsureWebView2
+  Call WebView2Version
+  ${If} $0 != ""
+  ${AndIf} $0 != "0.0.0.0"
+    Return
+  ${EndIf}
+
+  DetailPrint "Installing Microsoft Edge WebView2 Runtime..."
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  System::Call 'urlmon::URLDownloadToFileW(p 0, w "${WEBVIEW2_BOOTSTRAPPER}", w "$PLUGINSDIR\MicrosoftEdgeWebView2Setup.exe", i 0, p 0) i .r0'
+  ${If} $0 == 0
+    nsExec::Exec '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "$$sig = Get-AuthenticodeSignature -LiteralPath ./MicrosoftEdgeWebView2Setup.exe; if ($$sig.Status -ne $\'Valid$\' -or $$sig.SignerCertificate.Subject -notmatch $\'(^|, )O=Microsoft Corporation(,|$$)$\') { exit 1 }"'
+    Pop $0
+    ${If} $0 == 0
+      ExecWait '"$PLUGINSDIR\MicrosoftEdgeWebView2Setup.exe" /silent /install' $0
+      Call WebView2Version
+      ${If} $0 != ""
+      ${AndIf} $0 != "0.0.0.0"
+        Return
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+
+  MessageBox MB_ICONSTOP "Install Microsoft Edge WebView2 Runtime from microsoft.com and run Knooo Setup again." /SD IDOK
+  SetErrorLevel 1
+  Abort
+FunctionEnd
+
 Section "Install"
   SetShellVarContext current
+  Call EnsureWebView2
   SetOutPath "$INSTDIR"
   SetOverwrite try
   ClearErrors
@@ -109,12 +150,13 @@ Section "Uninstall"
   ClearErrors
   Delete "$INSTDIR\Knooo-Studio.exe"
   ${If} ${Errors}
-    MessageBox MB_ICONSTOP "Close ${APP_NAME} before uninstalling." /SD IDOK
+    MessageBox MB_ICONSTOP "Quit ${APP_NAME} from the system tray before uninstalling." /SD IDOK
     SetErrorLevel 1
     Abort
   ${EndIf}
 
   Delete "$SMPROGRAMS\${APP_NAME}.lnk"
+  DeleteRegValue HKCU "${RUN_KEY}" "KnoooStudio"
   DeleteRegKey HKCU "${UNINSTALL_KEY}"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
