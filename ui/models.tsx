@@ -225,7 +225,7 @@ export function AutomaticReviewSettings({
   <div className="auto-review-head">
    <div>
     <h2>自动工作回顾</h2>
-    <p>启用后，Knooo 会在会话静默 5 分钟后自动做增量提炼；已沉淀记录永久复用，可限定自动提炼范围控制 Token 开销。</p>
+    <p>启用后，每条会话静默 2 小时才自动提炼。工作回顾页可查看倒计时，也可立即提炼。已保存且有效的回顾会复用，只处理新增消息。</p>
    </div>
    <span className="provider-status" data-status={activeRunning ? 'ready' : 'disabled'}>
     <span className="provider-status-dot" aria-hidden="true"/>

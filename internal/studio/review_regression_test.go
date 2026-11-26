@@ -71,21 +71,21 @@ func TestAutomaticReviewReportsDatedContributionsAndReopens(t *testing.T) {
 
 	for _, test := range []struct {
 		name, from, to string
-		section        string
+		status         string
 		want, omit     []string
 		refs           []string
 	}{
-		{"initial day", first, second, "本期成果", []string{initial.Outcome}, []string{update.Outcome}, []string{"old-user", "old-answer"}},
-		{"continuation day", second, third, "本期成果", []string{update.Outcome}, []string{initial.Approach, initial.Outcome}, []string{"continuation"}},
-		{"reopened day", third, end, "阻碍与待办", nil, []string{initial.Approach, initial.Outcome, update.Outcome}, []string{"reopen"}},
-		{"before reopening", first, third, "本期成果", []string{update.Outcome}, []string{initial.Outcome}, []string{"old-user", "old-answer", "continuation"}},
-		{"full span", first, end, "阻碍与待办", []string{initial.Approach}, []string{initial.Outcome, update.Outcome}, []string{"old-user", "old-answer", "continuation", "reopen"}},
+		{"initial day", first, second, "已验证", []string{initial.Outcome}, []string{update.Outcome}, []string{"old-user", "old-answer"}},
+		{"continuation day", second, third, "已验证", []string{update.Outcome}, []string{initial.Approach, initial.Outcome}, []string{"continuation"}},
+		{"reopened day", third, end, "待跟进", nil, []string{initial.Approach, initial.Outcome, update.Outcome}, []string{"reopen"}},
+		{"before reopening", first, third, "已验证", []string{update.Outcome}, []string{initial.Outcome}, []string{"old-user", "old-answer", "continuation"}},
+		{"full span", first, end, "待跟进", []string{initial.Approach}, []string{initial.Outcome, update.Outcome}, []string{"old-user", "old-answer", "continuation", "reopen"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			raw := reviewTestRequest(t, a, "GET", "/api/report?kind=custom&from="+test.from+"&to="+test.to, "")
 			report := decodeTestReport(t, []byte(raw))
-			if report.Coverage.Topics != 1 || len(report.Sections) != 1 || report.Sections[0].Title != test.section ||
-				len(report.Sections[0].Items) != 1 || report.Sections[0].Items[0].Title != initial.Problem ||
+			if report.Coverage.Topics != 1 || len(report.Sections) != 1 || report.Sections[0].Title != "其他事项" ||
+				len(report.Sections[0].Items) != 1 || report.Sections[0].Items[0].Title != initial.Problem || report.Sections[0].Items[0].Status != test.status ||
 				!slices.Equal(reportSourceIDs(report), test.refs) {
 				t.Fatalf("expected one contribution with only in-window evidence: %s", raw)
 			}
@@ -296,15 +296,15 @@ func TestAutomaticReviewMergesRefinedProblemAcrossBatchesAndConsolidatesHistory(
 
 func TestAutomaticReviewIdleCooldownAndPersistedFailure(t *testing.T) {
 	now := time.Now().UTC()
-	recent := now.Add(-30 * time.Second).Format(time.RFC3339)
-	idle := now.Add(-10 * time.Minute).Format(time.RFC3339)
-	window := "kind=custom&from=" + now.Add(-time.Hour).Format(time.RFC3339) + "&to=" + now.Add(time.Hour).Format(time.RFC3339)
+	recent := now.Add(-90 * time.Minute).Truncate(time.Second)
+	idle := now.Add(-3 * time.Hour).Format(time.RFC3339)
+	window := "kind=custom&from=" + now.Add(-4*time.Hour).Format(time.RFC3339) + "&to=" + now.Add(time.Hour).Format(time.RFC3339)
 
 	item := sessions.Session{
-		ID: "active-session", Agent: "codex", Project: "示例项目", Title: "排查登录超时", Updated: recent,
+		ID: "active-session", Agent: "codex", Project: "示例项目", Title: "排查登录超时", Updated: idle,
 		Messages: []sessions.Message{
-			{ID: "u1", Role: "user", Text: "排查登录接口超时", Timestamp: recent},
-			{ID: "a1", Role: "assistant", Text: "发现连接池配置过小，已调大并验证通过。", Timestamp: recent},
+			{ID: "u1", Role: "user", Text: "排查登录接口超时", Timestamp: idle},
+			{ID: "a1", Role: "assistant", Text: "发现连接池配置过小，已调大并验证通过。", Timestamp: recent.Format(time.RFC3339)},
 		},
 	}
 	// Concise title matching the crisp user prompt should be accepted without rejecting.
@@ -320,15 +320,15 @@ func TestAutomaticReviewIdleCooldownAndPersistedFailure(t *testing.T) {
 	a := openReviewTestApp(t, data, item)
 	configureReviewTest(t, a, gateway)
 
-	// While active (< 5 min idle), background review must defer without calling the model.
 	a.processReviews(context.Background(), false)
 	if calls.Load() != 0 {
 		t.Fatalf("active session should wait for idle cooldown, got %d calls", calls.Load())
 	}
 	var res struct{ Entries []reviewEntry }
 	body := reviewTestRequest(t, a, "GET", "/api/reviews?"+window, "")
-	if err := json.Unmarshal([]byte(body), &res); err != nil || len(res.Entries) != 1 || res.Entries[0].State != "cooldown" {
-		t.Fatalf("expected cooldown state for active session, got %s", body)
+	if err := json.Unmarshal([]byte(body), &res); err != nil || len(res.Entries) != 1 || res.Entries[0].State != "cooldown" ||
+		res.Entries[0].AutoReviewAt != recent.Add(2*time.Hour).Format(time.RFC3339) {
+		t.Fatalf("expected cooldown deadline two hours after the latest message, got %s", body)
 	}
 
 	// Once idle past reviewIdleDelay, the session processes in a single call and accepts concise title reuse.
@@ -340,7 +340,8 @@ func TestAutomaticReviewIdleCooldownAndPersistedFailure(t *testing.T) {
 		t.Fatalf("expected one review call once idle, got %d", calls.Load())
 	}
 	body = reviewTestRequest(t, a, "GET", "/api/reviews?"+window, "")
-	if err := json.Unmarshal([]byte(body), &res); err != nil || len(res.Entries) != 1 || res.Entries[0].State != "ready" || len(res.Entries[0].Topics) != 1 {
+	if err := json.Unmarshal([]byte(body), &res); err != nil || len(res.Entries) != 1 || res.Entries[0].State != "ready" ||
+		len(res.Entries[0].Topics) != 1 || strings.Contains(body, `"autoReviewAt"`) {
 		t.Fatalf("expected ready concise topic after idle, got %s", body)
 	}
 
@@ -372,7 +373,7 @@ func TestAutomaticReviewIdleCooldownAndPersistedFailure(t *testing.T) {
 }
 
 func TestAutomaticReviewBacksOffTransientFailureAndProcessesOtherSessions(t *testing.T) {
-	idle := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	idle := time.Now().UTC().Add(-3 * time.Hour).Format(time.RFC3339)
 	slow := sessions.Session{
 		ID: "slow-session", Agent: "codex", Project: "示例项目", Title: "超长会话", Updated: idle,
 		Messages: []sessions.Message{
@@ -552,6 +553,129 @@ func TestManualReviewKeepsPublishedTopicsUntilReplacementFinishes(t *testing.T) 
 	if calls.Load() != 3 || entry.State != "ready" || len(entry.Topics) != 2 ||
 		entry.Topics[0].Title != first.Title || entry.Topics[1].Title != next.Title {
 		t.Fatalf("expected resumed replacement to publish atomically: calls=%d, entry=%+v", calls.Load(), entry)
+	}
+}
+
+func TestManualReviewResumesOnlyMissingMessages(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	item := reviewTestSession()
+	published := distill.Topic{Title: "支付回调", Problem: "核对回调处理", Status: "open", Evidence: []string{"old-user"}}
+	next := distill.Topic{Title: "缓存索引", Problem: "核对缓存索引", Status: "open", Evidence: []string{"next-user"}}
+	gateway, calls := reviewTestGateway(t, []reviewTestBatch{
+		{ids: []string{"next-user"}, status: http.StatusServiceUnavailable},
+		{ids: []string{"next-user"}, topics: []distill.Topic{next}},
+	})
+	data := t.TempDir()
+	a := openReviewTestApp(t, data, item)
+	profile := configureReviewTest(t, a, gateway)
+	if _, err := a.saveReview(ctx, item.ID, reviewRevision(item.Messages), reviewCheckpoint{Consumed: len(item.Messages), Topics: []distill.Topic{published}}, storedReview{}); err != nil {
+		t.Fatal(err)
+	}
+	item.Updated = now.Format(time.RFC3339Nano)
+	item.Messages = append(item.Messages, sessions.Message{
+		ID: "next-user", Role: "user", Timestamp: item.Updated, Text: "请继续检查缓存索引。",
+	})
+	setReviewTestSession(a, item)
+	a.review.wake = make(chan struct{}, 1)
+	a.processReviews(ctx, false)
+	if calls.Load() != 0 {
+		t.Fatal("appended messages should wait for the automatic review deadline")
+	}
+	request := `{"id":"` + item.ID + `","incremental":true}`
+	assertQueued := func(a *app, want bool) {
+		t.Helper()
+		var reply struct{ OK, Queued bool }
+		body := reviewTestRequest(t, a, "POST", "/api/reviews/retry", request)
+		if err := json.Unmarshal([]byte(body), &reply); err != nil || !reply.OK || reply.Queued != want {
+			t.Fatalf("unexpected manual review response: %s (want queued=%t)", body, want)
+		}
+	}
+	assertQueued(a, true)
+	assertQueued(a, false)
+
+	setReviewTestModel(t, a, "")
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a = openReviewTestApp(t, data, item)
+	setReviewTestModel(t, a, profile.ID)
+	a.review.wake = make(chan struct{}, 1)
+	a.processReviews(ctx, false)
+	if calls.Load() != 1 {
+		t.Fatalf("manual review should resume after reopening, got %d calls", calls.Load())
+	}
+	assertQueued(a, true)
+	a.processReviews(ctx, false)
+	assertQueued(a, false)
+	a.processReviews(ctx, false)
+	window := "kind=custom&from=" + now.Add(-time.Hour).Format(time.RFC3339) + "&to=" + now.Add(time.Hour).Format(time.RFC3339)
+	var result struct{ Entries []reviewEntry }
+	body := reviewTestRequest(t, a, "GET", "/api/reviews?"+window, "")
+	if err := json.Unmarshal([]byte(body), &result); err != nil || calls.Load() != 2 || len(result.Entries) != 1 {
+		t.Fatalf("expected two suffix attempts and one review, got %d calls and %s", calls.Load(), body)
+	}
+	if entry := result.Entries[0]; entry.State != "ready" || len(entry.Topics) != 2 ||
+		entry.Topics[0].Title != published.Title || entry.Topics[1].Title != next.Title {
+		t.Fatalf("expected suffix and saved topics to publish together: %s", body)
+	}
+}
+
+func TestManualReviewYieldsAutomaticBacklogWithoutCancelingActiveSessions(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	active := make(chan struct{}, reviewConcurrency)
+	release := make(chan struct{})
+	batches := make([]reviewTestBatch, reviewConcurrency)
+	for i := range batches {
+		batches[i] = reviewTestBatch{ids: []string{"old-user", "old-answer"}, topics: []distill.Topic{}, beforeReply: func(ctx context.Context) {
+			active <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}}
+	}
+	gateway, calls := reviewTestGateway(t, batches)
+	a := openReviewTestApp(t, t.TempDir(), reviewTestSession())
+	configureReviewTest(t, a, gateway)
+	a.review.wake = make(chan struct{}, 1)
+	a.review.cancelRun = cancel
+	for _, id := range []string{"auto-second", "auto-third", "auto-backlog", "manual"} {
+		item := reviewTestSession()
+		item.ID = id
+		a.sessions = append(a.sessions, item)
+	}
+	a.revisions = reviewRevisions(a.sessions)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.processReviews(ctx, false)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	for range reviewConcurrency {
+		select {
+		case <-active:
+		case <-time.After(3 * time.Second):
+			t.Fatal("automatic reviews did not start")
+		}
+	}
+	if body := reviewTestRequest(t, a, "POST", "/api/reviews/retry", `{"id":"checkpoint","incremental":true}`); !strings.Contains(body, `"queued":false`) {
+		t.Fatalf("active session should not be queued twice: %s", body)
+	}
+	if body := reviewTestRequest(t, a, "POST", "/api/reviews/retry", `{"id":"manual","incremental":true}`); !strings.Contains(body, `"queued":true`) {
+		t.Fatalf("manual request should be queued: %s", body)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("manual request canceled in-flight model calls")
+	}
+	close(release)
+	<-done
+	if calls.Load() != reviewConcurrency {
+		t.Fatalf("automatic backlog should wait for the manual run, got %d requests", calls.Load())
 	}
 }
 

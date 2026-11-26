@@ -16,7 +16,8 @@ type Session = AgentSource & { id: string; project: string; projectPath: string;
 type Message = { id: string; role: string; text: string; timestamp: string; line: number };
 type ProjectSource = Location & {project:string;projectPath:string};
 type Topic = { title: string; problem: string; approach?:string; outcome: string; status: string; lesson: string; exercise: string; evidence: string[]; evidenceVersions?:Record<string,string>; evidenceStale?:boolean };
-type ReviewEntry = { session:Session; state:'ready'|'queued'|'running'|'cooldown'|'skipped'|'error'|'disabled'; topics?:Topic[] };
+type ReviewEntry = { session:Session; state:'ready'|'queued'|'running'|'cooldown'|'skipped'|'error'|'disabled'; topics?:Topic[]; autoReviewAt?:string };
+type RetryReview = (id:string, incremental:boolean)=>Promise<void>;
 type Review = { connectionId:string; error?:string; settingsError?:boolean; entries:ReviewEntry[] };
 type Detail = { session: Session; topics: Topic[] | null; generated: boolean; staleAnchor?:boolean };
 type DistillPlan = { inputBudget:number; outputBudget:number; totalOutputBudget?:number; thinkingBudget?:number; estimatedInput:number; included:number; total:number; shortened:boolean; confirmation:string };
@@ -167,12 +168,12 @@ function App() {
  const sessionMap = useMemo(() => new Map(listing.sessions.map(session => [session.id, session])), [listing]);
  const fail = (err:unknown) => setError(err instanceof Error ? err.message : String(err));
  function collapseReader() { setReaderCollapsed(true);readerToggle.current?.focus(); }
- async function retryReviewSession(id: string) {
+ async function retryReviewSession(id: string, incremental: boolean) {
   setError('');
   setNotice('');
   try {
-   await api('reviews/retry', { id });
-   setNotice('已加入提炼队列，稍后自动更新。');
+   const result = await api<{queued:boolean}>('reviews/retry', { id, incremental });
+   setNotice(result.queued ? '已加入提炼队列，稍后自动更新。' : '这条会话已提炼，或已进入提炼队列。');
    setReviewTick(v => v + 1);
   } catch (err) {
    fail(err);
@@ -314,7 +315,7 @@ function App() {
    <button className="brand" aria-label="Knooo 首页" title="Knooo" onClick={()=>navigate('review')}><EagleMark/><span>Knooo</span></button>
    <nav className="nav-group" aria-label="工作台">{nav.slice(0,5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
    <nav className="nav-group system" aria-label="应用">{nav.slice(5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
-   <div className="rail-bottom"><div><span className="connection-dot"/> <span>{about?.demo ? '演示工作区' : '本机工作区'}</span></div><button onClick={()=>navigate('about')}>v{about?.version ?? '0.1.0'} <ArrowUpRight size={13}/></button></div>
+   <div className="rail-bottom">{about?.demo && <div><span className="connection-dot"/><span>演示工作区</span></div>}<button onClick={()=>navigate('about')}>v{about?.version ?? '0.1.0'} <ArrowUpRight size={13}/></button></div>
    {!narrow && !navCollapsed && <PanelGrip side="left" width={displayLeft} min={leftBounds.min} max={maxLeft} onResize={setLeftWidth} onToggle={()=>{setNavCollapsed(true);navToggle.current?.focus();}}/>}
   </aside>
   <div className="workbench">
@@ -451,16 +452,38 @@ function ReviewTopicCard({topic,sessionTitle,sessionId,demo,onSaveNote,open}:{
  </li>;
 }
 
-function ReviewSessionBlock({entry,focusedMode,statusFilter,searchTerm,demo,canRetry,onRetry,onSaveNote,open}:{
- entry:ReviewEntry; focusedMode:boolean; statusFilter:ReviewStatusFilter; searchTerm:string;
- demo:boolean; canRetry:boolean;
- onRetry:(id:string)=>Promise<void>;
+function reviewCountdown(deadline:number, now:number) {
+ const minutes = Math.ceil((deadline-now)/60000);
+ if (minutes<=0) return '等待后台调度';
+ if (minutes===1) return '不到 1 分钟后自动提炼';
+ const hours = Math.floor(minutes/60);
+ return `${hours ? `${hours} 小时 ` : ''}${minutes%60 ? `${minutes%60} 分钟` : ''}`.trim() + '后自动提炼';
+}
+
+function ReviewRunButton({entry,onRetry}: {entry:ReviewEntry; onRetry:RetryReview}) {
+ const [submitting,setSubmitting] = useState(false);
+ const rebuild = entry.state==='ready';
+ if (entry.state==='running' || entry.state==='queued') return <span className="review-session-count">{entry.state==='running' ? '提炼中…' : '已排队'}</span>;
+ async function run() {
+  setSubmitting(true);
+  try { await onRetry(entry.session.id,!rebuild); }
+  finally { setSubmitting(false); }
+ }
+ return <button type="button" className={`button ${rebuild ? 'text-button review-retry-btn' : 'secondary'}`} disabled={submitting}
+  title={rebuild ? '从头重新提炼这条会话' : undefined} onClick={()=>void run()}>
+  <RefreshCw size={13}/>{submitting ? '正在提交…' : rebuild ? '重新提炼' : '立即提炼'}
+ </button>;
+}
+
+function ReviewSessionBlock({entry,collapsed,onToggle,focusedMode,statusFilter,searchTerm,demo,canRetry,now,onRetry,onSaveNote,open}:{
+ entry:ReviewEntry; collapsed:boolean; onToggle:()=>void; focusedMode:boolean; statusFilter:ReviewStatusFilter; searchTerm:string;
+ demo:boolean; canRetry:boolean; now:number;
+ onRetry:RetryReview;
  onSaveNote:(sessionId:string,topic:Topic)=>Promise<void>;
  open:OpenSession;
 }) {
  const [showAllPrimary,setShowAllPrimary] = useState(false);
  const [showSecondary,setShowSecondary] = useState(false);
- const [retrying,setRetrying] = useState(false);
  const {session,topics=[]} = entry;
  const filtered = topics.filter(topic => matchesStatusFilter(topic, statusFilter) && matchesReviewQuery(topic, session, searchTerm));
  if (filtered.length === 0) return null;
@@ -491,46 +514,42 @@ function ReviewSessionBlock({entry,focusedMode,statusFilter,searchTerm,demo,canR
   ? [`${primary.length} 项重点`, secondary.length > 0 ? `${secondary.length} 条观察/微步骤` : ''].filter(Boolean)
   : [`${secondary.length} 条观察`];
 
- async function handleRetry() {
-  setRetrying(true);
-  try { await onRetry(session.id); }
-  finally { setRetrying(false); }
- }
-
- return <article className="review-session">
+ return <article className={`review-session ${collapsed ? 'is-collapsed' : ''}`}>
   <div className="review-session-heading">
-   <div className="review-session-meta">
+   <button type="button" className="review-session-toggle" aria-expanded={!collapsed} title={collapsed ? '点击展开该会话条目' : '点击收起该会话条目'} onClick={onToggle}>
     <div className="review-session-badges">
      <AgentBadge source={session}/>
      <span className="review-session-count">{summaryParts.join(' · ')}</span>
      {session.updated && <span className="review-session-time">{historyTime(session.updated)}</span>}
+     {entry.autoReviewAt && <span className="review-session-time">{reviewCountdown(Date.parse(entry.autoReviewAt),now)}</span>}
+     {collapsed && <span className="review-session-folded-pill">已收起</span>}
     </div>
     <h4>{session.title}</h4>
-   </div>
+   </button>
    <div className="review-session-actions">
-    {canRetry && <button type="button" className="button text-button review-retry-btn" disabled={retrying || entry.state==='running'} onClick={()=>void handleRetry()}>
-     <RefreshCw size={13}/>{retrying || entry.state==='running' ? '提炼中…' : '重新提炼'}
-    </button>}
+    {canRetry && <ReviewRunButton entry={entry} onRetry={onRetry}/>}
     <button className="button secondary" onClick={()=>open(session.id,undefined,'raw')}>查看会话 <ArrowUpRight size={14}/></button>
    </div>
   </div>
-  <ul className="review-questions">{shown.map((topic,index)=><ReviewTopicCard key={`${topic.title}-${index}`} topic={topic} sessionTitle={session.title} sessionId={session.id} demo={demo} onSaveNote={onSaveNote} open={open}/>)}</ul>
-  {effectiveFocused && hiddenPrimary > 0 && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowAllPrimary(true)}>
-   <ChevronDown size={14}/>展开其余 {hiddenPrimary} 项重点工作
-  </button>}
-  {effectiveFocused && primary.length > primaryLimit && showAllPrimary && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowAllPrimary(false)}>
-   <ChevronRight size={14}/>收起多余重点工作
-  </button>}
-  {effectiveFocused && primary.length > 0 && foldedSecondary.length > 0 && <div className="review-secondary-drawer">
-   <button type="button" className="review-secondary-toggle" aria-expanded={showSecondary} onClick={()=>setShowSecondary(v=>!v)}>
-    {showSecondary ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}
-    <span>{showSecondary ? '收起背景观察与微步骤' : `另有 ${foldedSecondary.length} 条背景观察与微步骤`}</span>
-   </button>
-   {showSecondary && <ul className="review-questions is-secondary">{foldedSecondary.map((topic,index)=><ReviewTopicCard key={`sec-${topic.title}-${index}`} topic={topic} sessionTitle={session.title} sessionId={session.id} demo={demo} onSaveNote={onSaveNote} open={open}/>)}</ul>}
-  </div>}
-  {effectiveFocused && primary.length === 0 && secondary.length > fallbackLimit && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowSecondary(v=>!v)}>
-   {showSecondary ? <><ChevronRight size={14}/>收起其余观察</> : <><ChevronDown size={14}/>展开其余 {secondary.length - fallbackLimit} 条观察</>}
-  </button>}
+  {!collapsed && <>
+   <ul className="review-questions">{shown.map((topic,index)=><ReviewTopicCard key={`${topic.title}-${index}`} topic={topic} sessionTitle={session.title} sessionId={session.id} demo={demo} onSaveNote={onSaveNote} open={open}/>)}</ul>
+   {effectiveFocused && hiddenPrimary > 0 && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowAllPrimary(true)}>
+    <ChevronDown size={14}/>展开其余 {hiddenPrimary} 项重点工作
+   </button>}
+   {effectiveFocused && primary.length > primaryLimit && showAllPrimary && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowAllPrimary(false)}>
+    <ChevronRight size={14}/>收起多余重点工作
+   </button>}
+   {effectiveFocused && primary.length > 0 && foldedSecondary.length > 0 && <div className="review-secondary-drawer">
+    <button type="button" className="review-secondary-toggle" aria-expanded={showSecondary} onClick={()=>setShowSecondary(v=>!v)}>
+     {showSecondary ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}
+     <span>{showSecondary ? '收起背景观察与微步骤' : `另有 ${foldedSecondary.length} 条背景观察与微步骤`}</span>
+    </button>
+    {showSecondary && <ul className="review-questions is-secondary">{foldedSecondary.map((topic,index)=><ReviewTopicCard key={`sec-${topic.title}-${index}`} topic={topic} sessionTitle={session.title} sessionId={session.id} demo={demo} onSaveNote={onSaveNote} open={open}/>)}</ul>}
+   </div>}
+   {effectiveFocused && primary.length === 0 && secondary.length > fallbackLimit && <button type="button" className="button text-button review-fold-toggle" onClick={()=>setShowSecondary(v=>!v)}>
+    {showSecondary ? <><ChevronRight size={14}/>收起其余观察</> : <><ChevronDown size={14}/>展开其余 {secondary.length - fallbackLimit} 条观察</>}
+   </button>}
+  </>}
  </article>;
 }
 
@@ -538,14 +557,16 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
  review:Review; selected:Map<string,Session>; onSelect:(next:Map<string,Session>)=>void;
  collapsed:Set<string>; onCollapse:(next:Set<string>)=>void;
  demo:boolean; onSettings:()=>void; onLogs:()=>void;
- onRetry:(id:string)=>Promise<void>;
+ onRetry:RetryReview;
  onSaveNote:(sessionId:string,topic:Topic)=>Promise<void>;
  open:OpenSession;
 }) {
  const [viewMode,setViewMode] = useState<'focused'|'all'>('focused');
  const [statusFilter,setStatusFilter] = useState<ReviewStatusFilter>('all');
  const [searchQuery,setSearchQuery] = useState('');
- const [showUnreviewed,setShowUnreviewed] = useState(false);
+ const [showUnreviewed,setShowUnreviewed] = useState<boolean>();
+ const [collapsedSessions,setCollapsedSessions] = useState<Set<string>>(()=>new Set());
+ const [now,setNow] = useState(Date.now);
 
  const options = new Map(selected);
  for (const {session} of review.entries) options.set(projectKey(session),session);
@@ -553,8 +574,15 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
  const ready = visible.filter(entry=>entry.state==='ready').length;
  const pending = visible.filter(entry=>entry.state==='queued'||entry.state==='running').length;
  const cooling = visible.filter(entry=>entry.state==='cooldown').length;
- const skippedOrFailed = visible.filter(entry=>(entry.state==='skipped'||entry.state==='error') && !entry.topics?.length);
+ const unreviewed = visible.filter(entry=> !entry.topics?.length && entry.state!=='ready' && entry.state!=='disabled');
+ const nextReviewAt = visible.reduce((next,{autoReviewAt})=>autoReviewAt ? Math.min(next,Date.parse(autoReviewAt)) : next,Infinity);
  const running = visible.some(entry=>entry.state==='running');
+ useEffect(()=>{
+  if (!Number.isFinite(nextReviewAt)) return;
+  setNow(Date.now());
+  const timer = setInterval(()=>setNow(Date.now()),15000);
+  return ()=>clearInterval(timer);
+ },[nextReviewAt]);
 
  let doneCount = 0;
  let openCount = 0;
@@ -562,6 +590,7 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
  const projectKeysWithTopics = new Set<string>();
  const searchTerm = searchQuery.trim();
  const groups = new Map<string,ReviewEntry[]>();
+ const visibleSessionIds:string[] = [];
  for (const entry of visible) {
   if (!entry.topics?.length) continue;
   const pKey = projectKey(entry.session);
@@ -573,13 +602,35 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
   }
   const hasMatch = entry.topics.some(topic => matchesStatusFilter(topic, statusFilter) && matchesReviewQuery(topic, entry.session, searchTerm));
   if (!hasMatch) continue;
+  visibleSessionIds.push(entry.session.id);
   const group = groups.get(pKey);
   if (group) group.push(entry);
   else groups.set(pKey,[entry]);
  }
  const totalTopics = doneCount + openCount + observedCount;
  const canRetry = !demo && !!review.connectionId;
+ const unreviewedExpanded = showUnreviewed ?? totalTopics===0;
  const hasActiveFilter = statusFilter !== 'all' || !!searchTerm;
+ const allSessionsCollapsed = visibleSessionIds.length > 0 && visibleSessionIds.every(id => collapsedSessions.has(id));
+ function toggleSessionFold(id:string) {
+  setCollapsedSessions(current => {
+   const next = new Set(current);
+   if (next.has(id)) next.delete(id);
+   else next.add(id);
+   return next;
+  });
+ }
+ function toggleAllSessionsFold() {
+  setCollapsedSessions(current => {
+   const next = new Set(current);
+   if (allSessionsCollapsed) {
+    for (const id of visibleSessionIds) next.delete(id);
+   } else {
+    for (const id of visibleSessionIds) next.add(id);
+   }
+   return next;
+  });
+ }
 
  return <>
   {!demo && !review.connectionId && <div className="feedback"><span>选择默认模型后，Knooo 会自动提炼已导入会话。</span><button className="button secondary" onClick={onSettings}>设置默认模型 <ArrowRight size={15}/></button></div>}
@@ -632,15 +683,38 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
      <input value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} placeholder="筛选当前回顾…" aria-label="筛选当前工作回顾"/>
      {searchQuery && <button type="button" className="provider-clear-btn" aria-label="清空回顾筛选" onClick={()=>setSearchQuery('')}><X size={12}/></button>}
     </div>}
+    {visibleSessionIds.length > 0 && <button type="button" className="button text-button review-fold-all-btn" onClick={toggleAllSessionsFold}>
+     {allSessionsCollapsed ? '展开各会话' : '收起各会话'}
+    </button>}
     {hasActiveFilter && <button type="button" className="button text-button" onClick={()=>{setStatusFilter('all');setSearchQuery('');}}>重置筛选</button>}
    </div>
-   {visible.length>0 && <span role="status">已提炼 {ready} / {visible.length} 条会话{pending>0 ? ` · ${pending} 条处理中或排队` : ''}{cooling>0 ? ` · ${cooling} 条活跃会话静默后整理` : ''}</span>}
+   {visible.length>0 && <div className="review-progress">
+    <span role="status">已提炼 {ready} / {visible.length} 条会话{pending>0 ? ` · ${pending} 条处理中或排队` : ''}{cooling>0 ? ` · ${cooling} 条等待自动提炼` : ''}</span>
+    {Number.isFinite(nextReviewAt) && <span>下一条会话 · {reviewCountdown(nextReviewAt,now)}</span>}
+   </div>}
   </div>
 
   {(running || pending>0 && !review.error) && <div className="review-flight"><EagleLoading label={running ? '正在提炼会话' : '等待提炼会话'}/></div>}
+  {unreviewed.length > 0 && canRetry && <div className="review-unreviewed-box">
+   <button type="button" className="review-secondary-toggle" aria-expanded={unreviewedExpanded} onClick={()=>setShowUnreviewed(!unreviewedExpanded)}>
+    {unreviewedExpanded ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}
+    <span>待提炼会话（{unreviewed.length}）</span>
+   </button>
+   {unreviewedExpanded && <ul className="review-unreviewed-list">{unreviewed.map(entry=>{
+    const {session,state,autoReviewAt} = entry;
+    const detail = autoReviewAt ? reviewCountdown(Date.parse(autoReviewAt),now) : state==='skipped' ? '超出自动回顾范围' : state==='error' ? '上次提炼失败' : '';
+    return <li key={session.id}>
+     <AgentBadge source={session}/>
+     <div className="review-unreviewed-copy">
+      <strong>{session.title}</strong>
+      <small>{[session.project,historyTime(session.updated),detail].filter(Boolean).join(' · ')}</small>
+     </div>
+     <ReviewRunButton entry={entry} onRetry={onRetry}/>
+    </li>})}</ul>}
+  </div>}
   {visible.length===0 && <Empty icon={<Folder size={25}/>} title="这个范围没有会话"><p>可以切换时间范围或调整项目和 Agent 筛选。</p></Empty>}
   {groups.size===0 && totalTopics>0 && hasActiveFilter && <Empty icon={<Search size={25}/>} title="当前筛选条件下没有匹配条目"><p>试试切换状态筛选或清空关键词。</p><button type="button" className="button secondary" onClick={()=>{setStatusFilter('all');setSearchQuery('');}}>查看全部条目</button></Empty>}
-  {groups.size===0 && totalTopics===0 && ready>0 && pending===0 && <Empty icon={<ListChecks size={25}/>} title="没有可回顾的工作问题"><p>这个范围内已处理的会话没有可单独回顾的工作问题。</p></Empty>}
+  {groups.size===0 && totalTopics===0 && ready>0 && unreviewed.length===0 && <Empty icon={<ListChecks size={25}/>} title="没有可回顾的工作问题"><p>这个范围内已处理的会话没有可单独回顾的工作问题。</p></Empty>}
   <div className="projects">{[...groups.entries()].map(([key,entries])=>{
    const project = entries[0].session;
    const expanded = !collapsed.has(key);
@@ -650,25 +724,11 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
      if (expanded) next.add(key);
      else next.delete(key);
      onCollapse(next);
-    }}>{expanded ? <ChevronDown size={16}/> : <ChevronRight size={16}/>}<ProjectIcon/><span className="review-project-name"><strong>{project.project}</strong><small title={project.projectPath}>{projectOrigin(project)}</small></span><span className="project-count">{entries.length} 条会话</span></button></h3>
-    {expanded && entries.map(entry=><ReviewSessionBlock key={entry.session.id} entry={entry} focusedMode={viewMode==='focused'} statusFilter={statusFilter} searchTerm={searchTerm} demo={demo} canRetry={canRetry} onRetry={onRetry} onSaveNote={onSaveNote} open={open}/>)}
+    }}><ProjectIcon/><span className="review-project-name"><strong>{project.project}</strong><small title={project.projectPath}>{projectOrigin(project)}</small></span><span className="project-count-pill"><span>{entries.length} 条会话</span><ChevronDown size={12} strokeWidth={1.9} className="project-chevron" aria-hidden="true"/></span></button></h3>
+    {expanded && entries.map(entry=><ReviewSessionBlock key={entry.session.id} entry={entry} collapsed={collapsedSessions.has(entry.session.id)} onToggle={()=>toggleSessionFold(entry.session.id)} focusedMode={viewMode==='focused'} statusFilter={statusFilter} searchTerm={searchTerm} demo={demo} canRetry={canRetry} now={now} onRetry={onRetry} onSaveNote={onSaveNote} open={open}/>)}
    </section>;
   })}</div>
 
-  {skippedOrFailed.length > 0 && canRetry && <div className="review-unreviewed-box">
-   <button type="button" className="review-secondary-toggle" aria-expanded={showUnreviewed} onClick={()=>setShowUnreviewed(v=>!v)}>
-    {showUnreviewed ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}
-    <span>另有 {skippedOrFailed.length} 条未提炼会话（超出自动范围或上次失败），可按需单独提炼</span>
-   </button>
-   {showUnreviewed && <ul className="review-unreviewed-list">{skippedOrFailed.map(({session,state})=><li key={session.id}>
-    <AgentBadge source={session}/>
-    <div className="review-unreviewed-copy">
-     <strong>{session.title}</strong>
-     <small>{session.project} · {historyTime(session.updated)} · {state === 'skipped' ? '超出自动范围' : '上次提炼失败'}</small>
-    </div>
-    <button type="button" className="button secondary" onClick={()=>void onRetry(session.id)}><RefreshCw size={13}/>立即提炼</button>
-   </li>)}</ul>}
-  </div>}
  </>;
 }
 
@@ -791,6 +851,8 @@ function SessionLibrary({listing,scanning,selected,open,reload,onError,onNotice}
 }) {
  const [storedAgents,setAgents]=useState(()=>(localStorage.getItem('knooo-history-agent') ?? '').split(',').filter(Boolean));
  const [location,setLocation]=useState('');
+ const [selectedProjects,setSelectedProjects]=useState<Set<string>>(()=>new Set());
+ const [projectFilterQuery,setProjectFilterQuery]=useState('');
  const [query,setQuery]=useState('');
  const [search,setSearch]=useState<{key:string;matches:HistoryMatches;error?:string}>();
  const [archived,setArchived]=useState(false);
@@ -801,14 +863,52 @@ function SessionLibrary({listing,scanning,selected,open,reload,onError,onNotice}
  const locations=[...new Map(scope.map(s=>[locationKey(s),locationLabel(s)]))];
  const activeLocation=locations.some(([id])=>id===location) ? location : '';
  const locationSessions=activeLocation ? scope.filter(s=>activeLocation===locationKey(s)) : scope;
- const availableAgents=countAgents(locationSessions);
+
+ const {rootProjectKeys, projectOptions}=useMemo(()=>{
+  const byId=new Map(locationSessions.map(s=>[s.id,s]));
+  const rootKeys=new Map<string,string>();
+  const options=new Map<string,{session:Session;count:number;latest:number}>();
+  for (const session of locationSessions) {
+   let root=session;
+   let parent=byId.get(root.parentId ?? '');
+   const seen=new Set([session.id]);
+   while (parent && !seen.has(parent.id) && seen.size <= 8) {
+    root=parent;seen.add(parent.id);parent=byId.get(parent.parentId ?? '');
+   }
+   if (parent) root=session;
+   const pKey=projectKey(root);
+   rootKeys.set(session.id,pKey);
+   const updatedAt=Date.parse(session.updated || session.start) || 0;
+   const existing=options.get(pKey);
+   if (existing) {
+    existing.count++;
+    if (updatedAt > existing.latest) existing.latest=updatedAt;
+   } else {
+    options.set(pKey,{session:root,count:1,latest:updatedAt});
+   }
+  }
+  return {rootProjectKeys:rootKeys,projectOptions:options};
+ },[locationSessions]);
+
+ const activeProjects=useMemo(()=>{
+  const next=new Set<string>();
+  for (const key of selectedProjects) {
+   if (projectOptions.has(key)) next.add(key);
+  }
+  return next;
+ },[selectedProjects,projectOptions]);
+
+ const projectSessions=activeProjects.size
+  ? locationSessions.filter(s=>activeProjects.has(rootProjectKeys.get(s.id) ?? projectKey(s)))
+  : locationSessions;
+ const availableAgents=countAgents(projectSessions);
  const selectedAgents=storedAgents.filter(agent=>availableAgents.has(agent));
  const term=query.trim();
  const key=agentQuery({q:term},selectedAgents);
  const matches=term && search?.key===key ? search.matches : undefined;
  const searching=!!term && search?.key!==key;
  const searchError=term && search?.key===key ? search.error : undefined;
- const sessions=selectedAgents.length ? locationSessions.filter(s=>selectedAgents.includes(agentKey(s))) : locationSessions;
+ const sessions=selectedAgents.length ? projectSessions.filter(s=>selectedAgents.includes(agentKey(s))) : projectSessions;
  const matchCount=matches ? sessions.filter(s=>Object.hasOwn(matches,s.id)).length : sessions.length;
  const loading=scanning && (!matchCount || searching);
  const selection=picking ? {picked,toggle(id:string){setPicked(current=>{
@@ -816,6 +916,28 @@ function SessionLibrary({listing,scanning,selected,open,reload,onError,onNotice}
   if (next.has(id)) next.delete(id); else next.add(id);
   return next;
  });},busy} : undefined;
+
+ const sortedProjectOptions=useMemo(()=>{
+  const q=projectFilterQuery.trim().toLowerCase();
+  const list=[...projectOptions.entries()].sort(([,a],[,b])=>
+   b.latest - a.latest || (a.session.project || '未关联项目').localeCompare(b.session.project || '未关联项目','zh-CN')
+  );
+  if (!q) return list;
+  return list.filter(([,item])=>
+   (item.session.project || '未关联项目').toLowerCase().includes(q) ||
+   projectOrigin(item.session).toLowerCase().includes(q)
+  );
+ },[projectOptions,projectFilterQuery]);
+
+ const activeProjectLabel=useMemo(()=>{
+  if (activeProjects.size === 0) return '全部项目';
+  if (activeProjects.size === 1) {
+   const onlyKey=[...activeProjects][0];
+   return projectOptions.get(onlyKey)?.session.project || '未关联项目';
+  }
+  return `已选 ${activeProjects.size} 个项目`;
+ },[activeProjects,projectOptions]);
+
  useEffect(()=>{
   if (!term || scanning) return;
   const controller=new AbortController();
@@ -835,6 +957,20 @@ function SessionLibrary({listing,scanning,selected,open,reload,onError,onNotice}
   localStorage.setItem('knooo-history-agent',agents.join(','));
   resetSelection();
  }
+ function toggleProject(pKey:string, checked:boolean) {
+  setSelectedProjects(current=>{
+   const next=new Set(current);
+   if (checked) next.add(pKey);
+   else next.delete(pKey);
+   return next;
+  });
+  resetSelection();
+ }
+ function clearProjects() {
+  setSelectedProjects(new Set());
+  setProjectFilterQuery('');
+  resetSelection();
+ }
  async function archivePicked() {
   const ids=sessions.filter(s=>picked.has(s.id)).map(s=>s.id);
   if (!ids.length) return;
@@ -847,32 +983,55 @@ function SessionLibrary({listing,scanning,selected,open,reload,onError,onNotice}
   } catch (error) { onError(error); }
   finally { setBusy(false); }
  }
+ const projectKeyToken=[...activeProjects].sort().join(',');
  return <>
   <div className="history-toolbar">
    <AgentPicker counts={availableAgents} selected={selectedAgents} onChange={selectAgents} disabled={busy}/>
    <div className="history-actions">
     <label className="select"><SquareTerminal size={16}/><select aria-label="运行环境" value={activeLocation} disabled={busy} onChange={e=>{setLocation(e.target.value);resetSelection();}}><option value="">全部环境</option>{locations.map(([id,label])=><option key={id} value={id}>{label}</option>)}</select><ChevronDown size={13}/></label>
+    <ReviewDropdown label={activeProjects.size ? `筛选项目，已选 ${activeProjects.size} 个` : '筛选项目'}
+     className={`review-project-picker history-project-picker ${activeProjects.size ? 'has-selection' : ''}`}
+     trigger={<><Folder size={15}/><span className="history-project-trigger-label">{activeProjectLabel}</span><ChevronDown size={13}/></>}>
+     {close=><div className="review-project-options" role="group" aria-label="项目筛选">
+      {projectOptions.size > 5 && <div className="history-project-filter-search">
+       <Search size={13} aria-hidden="true"/>
+       <input value={projectFilterQuery} onChange={e=>setProjectFilterQuery(e.target.value)} placeholder="筛选项目名称或路径…" aria-label="筛选项目列表"/>
+       {projectFilterQuery && <button type="button" className="provider-clear-btn" aria-label="清空项目搜索" onClick={()=>setProjectFilterQuery('')}><X size={12}/></button>}
+      </div>}
+      {activeProjects.size>0 && <button type="button" className="button text-button" onClick={()=>{close();clearProjects();}}>清除项目筛选</button>}
+      {sortedProjectOptions.length===0 && <p>{projectFilterQuery.trim() ? '没有匹配的项目' : '当前范围没有项目'}</p>}
+      {sortedProjectOptions.map(([pKey,{session,count}])=>
+       <label key={pKey} className="review-project-option">
+        <input type="checkbox" checked={activeProjects.has(pKey)} onChange={event=>toggleProject(pKey,event.target.checked)}/>
+        <span><strong>{session.project || '未关联项目'}</strong><small>{projectOrigin(session)}</small></span>
+        <em className="history-project-option-count">{count}</em>
+       </label>)}
+     </div>}
+    </ReviewDropdown>
     <label className="history-search"><Search size={16}/><input type="search" value={query} disabled={busy} aria-label="搜索会话" placeholder="搜索标题、路径或原文" onChange={e=>{setQuery(e.target.value);setPicked(new Set());}}/></label>
     <button className="button secondary" aria-pressed={picking} disabled={busy || (!picking && !matchCount)} onClick={()=>{setPicking(!picking);setPicked(new Set());}}><ListChecks size={16}/>{picking ? '取消选择' : '选择'}</button>
-    <button className="button secondary" aria-pressed={archived} disabled={busy} onClick={()=>{setArchived(!archived);setLocation('');resetSelection();}}><Archive size={16}/>{archived ? '返回会话' : '已归档'}</button>
+    <button className="button secondary" aria-pressed={archived} disabled={busy} onClick={()=>{setArchived(!archived);setLocation('');clearProjects();}}><Archive size={16}/>{archived ? '返回会话' : '已归档'}</button>
    </div>
   </div>
   <div className="history-status">
-   <span className="muted" role="status">{loading || searching ? '' : searchError ? '搜索失败' : `${matchCount} 条${archived ? '已归档' : ''}会话`}</span>
+   <div className="history-status-summary">
+    <span className="muted" role="status">{loading || searching ? '' : searchError ? '搜索失败' : `${matchCount} 条${archived ? '已归档' : ''}会话`}</span>
+    {activeProjects.size > 0 && <button type="button" className="button text-button history-clear-projects" onClick={clearProjects}>清除项目筛选</button>}
+   </div>
    {picking && <button className="button primary" disabled={busy || !picked.size} onClick={()=>void archivePicked()}>{busy ? <EagleMark flying/> : archived ? <ArchiveRestore size={16}/> : <Archive size={16}/>} {busy ? archived ? '正在恢复…' : '正在归档…' : `${archived ? '恢复' : '归档'}所选（${picked.size}）`}</button>}
   </div>
   {listing.coverage && <ScanCoverage coverage={listing.coverage} warnings={listing.warnings ?? []}/>}
   {loading ? <EagleLoading label="正在发现本机会话"/> :
    searching ? <EagleLoading label="正在搜索会话"/> :
    searchError ? <p className="feedback error" role="alert">{searchError}</p> :
-   matchCount>0 ? <SessionHistory key={`${archived}:${activeLocation}:${key}`} sessions={sessions} environments={listing.coverage?.environments} selected={selected} open={open} matches={matches} selection={selection}/> :
+   matchCount>0 ? <SessionHistory key={`${archived}:${activeLocation}:${projectKeyToken}:${key}`} sessions={sessions} environments={listing.coverage?.environments} selected={selected} open={open} matches={matches} selection={selection} expandAll={activeProjects.size > 0}/> :
    <Empty icon={<MessagesSquare size={25}/>} title={term ? '没有匹配的会话' : archived ? '没有已归档的会话' : '当前视图没有会话'}>
-    <p>{term ? '试试缩短关键字。' : selectedAgents.length || activeLocation ? '切换 Agent 或运行环境查看其他来源。' : archived ? '归档的会话可以在这里恢复。' : 'Agent 历史会自动出现在这里。'}</p>
+    <p>{term ? '试试缩短关键字。' : selectedAgents.length || activeLocation || activeProjects.size ? '切换 Agent、项目或运行环境查看其他来源。' : archived ? '归档的会话可以在这里恢复。' : 'Agent 历史会自动出现在这里。'}</p>
    </Empty>}
  </>;
 }
 
-function SessionHistory({sessions, environments, selected, open, matches, selection}: {sessions:Session[]; environments?:ScanEnvironment[]; selected?:string; open:HistoryOpen;matches?:HistoryMatches;selection?:HistorySelection}) {
+function SessionHistory({sessions, environments, selected, open, matches, selection, expandAll=false}: {sessions:Session[]; environments?:ScanEnvironment[]; selected?:string; open:HistoryOpen;matches?:HistoryMatches;selection?:HistorySelection;expandAll?:boolean}) {
  const {groups, children} = useMemo(()=>{
   const byId = new Map(sessions.map(s=>[s.id,s]));
   const visible=new Set<string>();
@@ -914,7 +1073,7 @@ function SessionHistory({sessions, environments, selected, open, matches, select
   return {groups,children};
  },[sessions,matches]);
  return <div className="projects">{[...groups].map(([path,group],index)=>
-  <HistoryProject key={path} group={group} home={environments?.find(env=>locationKey(env)===locationKey(group.origin))?.home} defaultOpen={!!matches || index===0}>
+  <HistoryProject key={path} group={group} home={environments?.find(env=>locationKey(env)===locationKey(group.origin))?.home} defaultOpen={!!matches || expandAll || index===0}>
    {group.roots.map(session=><HistoryBranch key={session.id} session={session} childrenById={children} selected={selected} open={open} matches={matches} selection={selection}/>)}
   </HistoryProject>)}</div>;
 }
@@ -929,39 +1088,50 @@ function HistoryProject({group, home, defaultOpen, children}:{
  const location=wsl || locationLabel(group.origin);
  return <section className="project-card history-project">
   <button className="project-head" aria-expanded={expanded} onClick={()=>setExpanded(!expanded)}>
-   {expanded ? <ChevronDown size={16}/> : <ChevronRight size={16}/>}
+   <span className="tree-chevron" aria-hidden="true"><ChevronRight size={12} strokeWidth={2.2}/></span>
    <ProjectIcon/>
    <span className="history-project-copy"><strong title={title}>{title}</strong><small title={projectOrigin(group.origin)}>{location}{path && ` · ${path}`}</small></span>
    <time className="history-project-time" dateTime={group.latest.updated}>{historyTime(group.latest.updated)}</time>
-   <span className="project-count">{group.count} 条会话</span>
+   <span className="project-count-tag">{group.count} 条会话</span>
   </button>
-  {expanded && children}
+  {expanded && <div className="history-project-body">{children}</div>}
  </section>;
 }
 
-function HistoryBranch({session, childrenById, selected, open, matches, selection}:{
- session:Session; childrenById:Map<string,Session[]>; selected?:string; open:HistoryOpen;matches?:HistoryMatches;selection?:HistorySelection;
+function HistoryBranch({session, childrenById, selected, open, matches, selection, depth=0}:{
+ session:Session; childrenById:Map<string,Session[]>; selected?:string; open:HistoryOpen;matches?:HistoryMatches;selection?:HistorySelection;depth?:number;
 }) {
  const [expanded,setExpanded] = useState(!!matches);
  const [showSource,setShowSource] = useState(false);
  const sourceId=useId();
  const children = childrenById.get(session.id);
  const match=matches && Object.hasOwn(matches,session.id) ? matches[session.id] : undefined;
- return <div className="history-branch">
-  <div className={`history-entry ${selection ? 'picking' : ''}`}>
-   {children && <button className="icon-button history-fold" aria-expanded={expanded} aria-label={`${expanded ? '收起' : '展开'} ${session.title} 的 ${children.length} 条子会话`} onClick={()=>setExpanded(!expanded)}>
-    {expanded ? <ChevronDown size={15}/> : <ChevronRight size={15}/>}
-   </button>}
+ const isChild = depth > 0;
+ return <div className={`history-branch ${isChild ? 'is-child' : ''}`}>
+  <div className={`history-entry ${selection ? 'picking' : ''} ${children ? 'has-children' : ''}`}>
+   {!isChild && <div className="history-tree-gutter">
+    {children ? <button type="button" className="history-fold" aria-expanded={expanded} aria-label={`${expanded ? '收起' : '展开'} ${session.title} 的 ${children.length} 条子会话`} onClick={()=>setExpanded(!expanded)}>
+     <ChevronRight size={11} strokeWidth={2.3}/>
+    </button> : <span className="history-leaf-dot" aria-hidden="true"/>}
+   </div>}
+   {isChild && children && <div className="history-tree-gutter is-inline">
+    <button type="button" className="history-fold" aria-expanded={expanded} aria-label={`${expanded ? '收起' : '展开'} ${session.title} 的 ${children.length} 条子会话`} onClick={()=>setExpanded(!expanded)}>
+     <ChevronRight size={11} strokeWidth={2.3}/>
+    </button>
+   </div>}
    {selection && <input type="checkbox" className="history-check" aria-label={`选择 ${session.title}`} checked={selection.picked.has(session.id)} disabled={selection.busy} onChange={()=>selection.toggle(session.id)}/>}
    <div className={`session-row ${selected===session.id ? 'selected' : ''}`}>
-    <span className="session-icon" aria-hidden="true"><MessagesSquare size={17}/></span>
+    <span className={`session-icon ${isChild ? 'is-child' : ''}`} aria-hidden="true">{isChild ? <ListTree size={13} strokeWidth={2.1}/> : <MessagesSquare size={14} strokeWidth={2}/>}</span>
     <div className="session-copy">
      <button className="session-open" aria-current={selected===session.id || undefined} title={session.title} onClick={()=>open(session.id,match?.messageId)}>{session.title}</button>
      <div className="session-labels">
       <button className="history-source-toggle" aria-label={`会话来源 ${locationLabel(session)} · ${session.title}`} aria-expanded={showSource} aria-controls={showSource ? sourceId : undefined} onClick={()=>setShowSource(!showSource)}>
-       <SquareTerminal size={13}/><span>{locationLabel(session)}</span><ChevronDown size={12}/>
+       <SquareTerminal size={11.5}/><span>{locationLabel(session)}</span><ChevronDown size={10.5} strokeWidth={1.9}/>
       </button>
       <AgentBadge source={session}/>
+      {children && <button type="button" className="history-children-badge" aria-expanded={expanded} onClick={()=>setExpanded(!expanded)}>
+       {children.length} 条子会话
+      </button>}
      </div>
      {match?.snippet && <small>{match.snippet}</small>}
     </div>
@@ -972,7 +1142,7 @@ function HistoryBranch({session, childrenById, selected, open, matches, selectio
    </div>
   </div>
   {showSource && <div className="history-source-panel session-source" id={sourceId}><SessionPaths session={session}/></div>}
-  {expanded && children && <div className="child-session">{children.map(child=><HistoryBranch key={child.id} session={child} childrenById={childrenById} selected={selected} open={open} matches={matches} selection={selection}/>)}</div>}
+  {expanded && children && <div className="child-session">{children.map(child=><HistoryBranch key={child.id} session={child} childrenById={childrenById} selected={selected} open={open} matches={matches} selection={selection} depth={depth+1}/>)}</div>}
  </div>;
 }
 

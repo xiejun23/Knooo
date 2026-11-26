@@ -20,7 +20,7 @@ import (
 )
 
 const reviewInterval = time.Minute
-const reviewIdleDelay = 5 * time.Minute
+const reviewIdleDelay = 2 * time.Hour
 const reviewConcurrency = 3
 const reviewResponseAttempts = 3
 
@@ -34,6 +34,7 @@ type reviewWorker struct {
 	close         context.CancelFunc
 	cancelRun     context.CancelFunc
 	running       map[string]string
+	yieldToManual bool
 	message       string
 	settingsError bool
 	rejected      map[string]reviewIssue
@@ -133,9 +134,10 @@ func (review storedReview) verified(messages []sessions.Message, revision string
 }
 
 type reviewEntry struct {
-	Session overviewItem    `json:"session"`
-	State   string          `json:"state"`
-	Topics  []distill.Topic `json:"topics,omitempty"`
+	Session      overviewItem    `json:"session"`
+	State        string          `json:"state"`
+	Topics       []distill.Topic `json:"topics,omitempty"`
+	AutoReviewAt string          `json:"autoReviewAt,omitempty"`
 }
 
 func reviewRevisions(items []sessions.Session) map[string]string {
@@ -307,7 +309,8 @@ func (a *app) setReviewModel(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) retryReview(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID string `json:"id"`
+		ID          string `json:"id"`
+		Incremental bool   `json:"incremental"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -336,27 +339,38 @@ func (a *app) retryReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.review.Lock()
-	err = a.queueReviewRetry(r.Context(), body.ID)
+	queued, err := a.queueReviewRetry(r.Context(), session, body.Incremental)
 	if err != nil {
 		a.review.Unlock()
-		http.Error(w, "无法重置会话回顾状态", http.StatusInternalServerError)
+		http.Error(w, "无法将会话加入提炼队列", http.StatusInternalServerError)
 		return
 	}
-	if a.review.cancelRun != nil {
-		a.review.cancelRun()
+	if queued {
+		if body.Incremental {
+			a.review.yieldToManual = true
+		} else if a.review.cancelRun != nil {
+			a.review.cancelRun()
+		}
+		delete(a.review.rejected, body.ID)
+		a.review.message = ""
 	}
-	delete(a.review.rejected, body.ID)
-	a.review.message = ""
 	a.review.Unlock()
-	a.startReview()
-	a.wakeReview(false)
-	jsonReply(w, map[string]bool{"ok": true})
+	if queued {
+		a.startReview()
+		a.wakeReview(false)
+	}
+	jsonReply(w, map[string]bool{"ok": true, "queued": queued})
 }
 
-func (a *app) queueReviewRetry(ctx context.Context, id string) error {
+// The caller holds the worker lock so the session cannot start while it is queued.
+func (a *app) queueReviewRetry(ctx context.Context, session sessions.Session, incremental bool) (bool, error) {
+	id := session.ID
+	if incremental && a.review.running[id] != "" {
+		return false, nil
+	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	var previous storedReview
@@ -364,24 +378,44 @@ func (a *app) queueReviewRetry(ctx context.Context, id string) error {
 	err = tx.QueryRowContext(ctx, `SELECT revision,content FROM reviews WHERE session=?`, id).Scan(&previous.revision, &raw)
 	if err == nil {
 		if err := previous.decode(raw); err != nil {
-			return err
+			return false, err
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return false, err
 	}
-	checkpoint := previous.reviewCheckpoint
-	checkpoint.Retry = &reviewRetry{Token: rand.Text()}
-	revision := previous.revision
-	if revision == "" {
-		revision = reviewRevision(nil)
+	pending := incremental && previous.Retry != nil
+	if !pending {
+		replacement := &reviewRetry{Token: rand.Text()}
+		if incremental {
+			progress, valid := previous.verified(session.Messages, reviewRevision(session.Messages))
+			if valid {
+				if progress.Consumed == len(session.Messages) {
+					return false, nil
+				}
+				replacement.Revision, replacement.Consumed, replacement.Topics = previous.revision, progress.Consumed, progress.Topics
+			}
+		}
+		checkpoint := previous.reviewCheckpoint
+		checkpoint.Retry = replacement
+		revision := previous.revision
+		if revision == "" {
+			revision = reviewRevision(nil)
+		}
+		if _, err := writeReview(ctx, tx, id, revision, checkpoint, previous); err != nil {
+			return false, err
+		}
 	}
-	if _, err := writeReview(ctx, tx, id, revision, checkpoint, previous); err != nil {
-		return err
+	deleted, err := tx.ExecContext(ctx, `DELETE FROM review_failures WHERE session=?`, id)
+	if err != nil {
+		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM review_failures WHERE session=?`, id); err != nil {
-		return err
+	if pending && a.review.rejected[id].revision == "" {
+		count, err := deleted.RowsAffected()
+		if err != nil || count == 0 {
+			return false, err
+		}
 	}
-	return tx.Commit()
+	return true, tx.Commit()
 }
 
 func (a *app) startReview() {
@@ -451,6 +485,10 @@ func (a *app) runReviews(ctx context.Context, wake <-chan struct{}, done chan<- 
 }
 
 func (a *app) processReviews(ctx context.Context, scan bool) {
+	a.review.Lock()
+	// Requests arriving after this point can be missing from this run's snapshot.
+	a.review.yieldToManual = false
+	a.review.Unlock()
 	id, maxAgeDays, err := a.reviewSettings(ctx)
 	if err != nil {
 		a.reviewFailure(ctx, "无法读取自动工作回顾设置，请在本机设置中重新保存", true)
@@ -553,31 +591,28 @@ func (a *app) processReviews(ctx context.Context, scan bool) {
 				continue
 			}
 			isManual := retry != nil
-			if !isManual && a.reviewCoolingDown(item, now) {
-				continue
-			}
-			if !isManual && reviewOutsideWindow(item, maxAgeDays, now) {
+			if !isManual && (reviewOutsideWindow(item, maxAgeDays, now) || !reviewCooldownUntil(item, now).IsZero()) {
 				continue
 			}
 			if failure, ok := persistedFailures[item.ID]; ok && failure.revision == revision {
 				continue
 			}
 			a.review.Lock()
-			rejected := a.review.rejected[item.ID].blocks(revision, time.Now())
-			a.review.Unlock()
-			if rejected {
+			if a.review.yieldToManual || ctx.Err() != nil {
+				a.review.Unlock()
+				next = len(items)
+				break
+			}
+			if a.review.rejected[item.ID].blocks(revision, time.Now()) {
+				a.review.Unlock()
 				continue
 			}
+			running[item.ID] = revision
+			a.review.Unlock()
 			if model == nil {
 				selected := selectedModel(ctx, config)
 				model = &selected
 			}
-			if ctx.Err() != nil {
-				break
-			}
-			a.review.Lock()
-			running[item.ID] = revision
-			a.review.Unlock()
 			go func(model distill.Model) {
 				err := distill.Review(ctx, config, model, inputs(item), checkpoint.Consumed, checkpoint.Topics, func(consumed int, topics []distill.Topic) error {
 					prefix := revision
@@ -609,10 +644,7 @@ func (a *app) processReviews(ctx context.Context, scan bool) {
 		revision := running[result.id]
 		err := result.err
 		event := platformEvent{Area: "review", SessionID: result.id}
-		var persistFailure *reviewIssue
-		var clearFailure bool
 		a.review.Lock()
-		delete(running, result.id)
 		if ctx.Err() == nil {
 			switch {
 			case errors.Is(err, errReviewChanged):
@@ -623,8 +655,7 @@ func (a *app) processReviews(ctx context.Context, scan bool) {
 				issue := rejectReview(a.review.rejected[result.id], revision, err, time.Now())
 				a.review.rejected[result.id] = issue
 				if issue.retryAt.IsZero() {
-					copyIssue := issue
-					persistFailure = &copyIssue
+					a.saveReviewFailure(ctx, result.id, issue)
 				}
 				event.Level, event.Action, event.Message = "error", "回顾内容校验失败", issue.message
 				if issue.attempts > 0 {
@@ -654,18 +685,14 @@ func (a *app) processReviews(ctx context.Context, scan bool) {
 				event.Level, event.Action = "info", "完成自动回顾"
 				consecutiveRejected = 0
 				delete(a.review.rejected, result.id)
-				clearFailure = true
+				a.clearReviewFailure(ctx, result.id)
 				if !failed {
 					a.review.message, a.review.settingsError = "", false
 				}
 			}
 		}
+		delete(running, result.id)
 		a.review.Unlock()
-		if persistFailure != nil {
-			a.saveReviewFailure(ctx, result.id, *persistFailure)
-		} else if clearFailure {
-			a.clearReviewFailure(ctx, result.id)
-		}
 		if event.Level != "" {
 			a.recordEvent(event)
 		}
@@ -802,16 +829,15 @@ func latestActivity(item sessions.Session) time.Time {
 	return latest
 }
 
-func (a *app) reviewCoolingDown(item sessions.Session, now time.Time) bool {
-	if a.reviewIdle <= 0 {
-		return false
-	}
+func reviewCooldownUntil(item sessions.Session, now time.Time) time.Time {
 	latest := latestActivity(item)
-	if latest.IsZero() {
-		return false
+	if latest.IsZero() || latest.After(now.Add(time.Minute)) {
+		return time.Time{}
 	}
-	age := now.Sub(latest)
-	return age >= -time.Minute && age < a.reviewIdle
+	if deadline := latest.Add(reviewIdleDelay); deadline.After(now) {
+		return deadline
+	}
+	return time.Time{}
 }
 
 func (a *app) readReviewFailures(ctx context.Context) (map[string]reviewIssue, error) {
@@ -948,6 +974,7 @@ func (a *app) reviews(w http.ResponseWriter, r *http.Request) {
 		entry := reviewEntry{State: "queued", Topics: stampTopicEvidence(publicReviewTopics(checkpoint.Topics), item.Messages)}
 		persisted := persistedFailures[item.ID]
 		isManual := previous.Retry != nil
+		cooldownUntil := reviewCooldownUntil(item, now)
 		switch {
 		case len(item.Messages) == 0 || !isManual && valid && checkpoint.Consumed == len(item.Messages):
 			entry.State = "ready"
@@ -959,10 +986,11 @@ func (a *app) reviews(w http.ResponseWriter, r *http.Request) {
 			entry.State = "running"
 		case message != "" || rejected[item.ID].revision == revision || persisted.revision == revision:
 			entry.State = "error"
-		case !isManual && a.reviewCoolingDown(item, now):
-			entry.State = "cooldown"
 		case !isManual && reviewOutsideWindow(item, maxAgeDays, now):
 			entry.State = "skipped"
+		case !isManual && !cooldownUntil.IsZero():
+			entry.State = "cooldown"
+			entry.AutoReviewAt = cooldownUntil.UTC().Format(time.RFC3339Nano)
 		}
 		if entry.State == "error" && result.Error == "" {
 			if issue := rejected[item.ID]; issue.revision == revision {

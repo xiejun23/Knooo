@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/xiejun23/Knooo/internal/distill"
 	"github.com/xiejun23/Knooo/internal/sessions"
@@ -63,12 +61,14 @@ type reportSource struct {
 type reportItem struct {
 	Title   string         `json:"title"`
 	Text    string         `json:"text"`
+	Status  string         `json:"status,omitempty"`
 	Sources []reportSource `json:"sources"`
 }
 
 type reportSection struct {
-	Title string       `json:"title"`
-	Items []reportItem `json:"items"`
+	Title        string       `json:"title"`
+	Items        []reportItem `json:"items"`
+	Supplemental bool         `json:"supplemental,omitempty"`
 }
 
 type reportCoverage struct {
@@ -100,16 +100,26 @@ type reportFactGroup struct {
 
 type reportLayout struct {
 	name, focus string
-	headings    [3]string
 	limit       int
 }
 
-var reportCategories = [...]distill.ReportCategory{distill.ReportOutcome, distill.ReportFinding, distill.ReportFollowup, distill.ReportQuestion}
+var reportTypes = [...]struct {
+	kind  distill.ReportType
+	title string
+}{
+	{distill.ReportFeature, "需求与功能开发"},
+	{distill.ReportBugfix, "缺陷排查与修复"},
+	{distill.ReportTesting, "测试联调与验收"},
+	{distill.ReportResearch, "学习与调研探索"},
+	{distill.ReportOps, "优化与工程维护"},
+	{distill.ReportOther, "其他事项"},
+	{distill.ReportQuestion, "期间记录的问题"},
+}
 
 var reportLayouts = map[string]reportLayout{
-	"daily":   {"日报", "突出当日可核实的具体成果、阻碍和待办。", [3]string{"当日成果", "发现", "阻碍与待办"}, 6},
-	"weekly":  {"周报", "跨项目按主题归纳进展，指出影响进度的阻碍和后续动作。", [3]string{"主题进展", "共性发现", "后续跟进"}, 8},
-	"monthly": {"月报", "提炼有证据的里程碑和可复用经验，避免把日常操作当作里程碑。", [3]string{"里程碑与成果", "发现与经验", "后续跟进"}, 8},
+	"daily":   {"日报", "按事项写清当日结果和下一步。", 15},
+	"weekly":  {"周报", "归并同一事项的跨天进展，写明结果和下一步。", 12},
+	"monthly": {"月报", "优先提炼有证据的里程碑、可复用经验和后续重点。", 8},
 }
 
 func reportLayoutFor(kind string, from, to time.Time) (reportLayout, bool) {
@@ -122,19 +132,11 @@ func reportLayoutFor(kind string, from, to time.Time) (reportLayout, bool) {
 	endDay := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC)
 	if !endDay.After(startDay.AddDate(0, 0, 3)) {
 		layout = reportLayouts["daily"]
-		layout.headings[0] = "本期成果"
 	} else if !endDay.Before(startDay.AddDate(0, 0, 28)) {
 		layout = reportLayouts["monthly"]
 	}
 	layout.name = "报告"
 	return layout, true
-}
-
-func (layout reportLayout) heading(index int) string {
-	if index == len(layout.headings) {
-		return "期间记录的问题"
-	}
-	return layout.headings[index]
 }
 
 func (a *app) report(w http.ResponseWriter, r *http.Request) {
@@ -206,9 +208,9 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 		}
 		versions := make(map[string]string)
 		group := reportFactGroup{session: item, project: [3]string{item.Platform, item.WSL, projectPath(item)}}
-		for _, topic := range distill.ConsolidateReviewTopics(checkpoint.Topics) {
+		for _, topic := range checkpoint.Topics {
 			entry, found := reportTopic(topic, roles, during)
-			if !found {
+			if !found || reportNoise(entry) {
 				continue
 			}
 			fact := reportFact{topic: entry, sources: make([]reportSource, 0, len(entry.Evidence))}
@@ -227,39 +229,25 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 			groups = append(groups, group)
 		}
 	}
+	facts := prepareReportFacts(groups, connectionID != "" && !a.demo)
+	var synthesis distill.ReportSynthesis
 	if connectionID != "" {
 		ctx := r.Context()
 		switch {
 		case a.demo:
 			result.Notice = "演示工作区使用本地汇总。"
-		case len(groups) == 0:
+		case len(facts) == 0:
 			result.Notice = "期间没有可供模型综合的工作回顾，已使用本地汇总。"
 		default:
 			config, err := a.connectionConfig(connectionID)
 			if err == nil {
-				facts, sources := prepareReportFacts(groups)
-				synthesis, synthErr := distill.SynthesizeReport(ctx, config, selectedModel(ctx, config), layout.focus, layout.limit, facts)
-				if synthErr == nil {
-					result.Mode, result.Summary = "model", synthesis.Summary
-					for index, category := range reportCategories {
-						pos := slices.IndexFunc(synthesis.Sections, func(group distill.ReportSection) bool { return group.Category == category })
-						if pos < 0 {
-							continue
-						}
-						section := synthesis.Sections[pos]
-						entry := reportSection{Title: layout.heading(index)}
-						for _, item := range section.Items {
-							row := reportItem{Title: item.Title, Text: item.Text}
-							for _, index := range item.Sources {
-								row.Sources = mergeReportSources(row.Sources, sources[index-1])
-							}
-							entry.Items = append(entry.Items, row)
-						}
-						result.Sections = append(result.Sections, entry)
-					}
-					if synthesis.Shortened {
-						result.Notice = "模型输入达到预算上限，部分工作回顾已缩短或省略。"
-					}
+				input := make([]distill.ReportFact, len(facts))
+				for i, fact := range facts {
+					input[i] = fact.model
+				}
+				synthesis, err = distill.SynthesizeReport(ctx, config, selectedModel(ctx, config), layout.focus, layout.limit, input)
+				if err == nil {
+					result.Mode = "model"
 				}
 			}
 			if result.Mode == "local" {
@@ -267,11 +255,14 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if result.Mode == "local" {
-		var shortened bool
-		result.Sections, shortened = localReportSections(groups, layout)
-		if shortened {
-			result.Notice = strings.TrimSpace(result.Notice + " 本地预览已达到篇幅上限，覆盖统计包含全部符合条件的回顾。")
+	var supplemented int
+	result.Sections, supplemented = reportSections(facts, synthesis.Items, layout.limit)
+	if result.Mode == "model" {
+		switch {
+		case supplemented > 0:
+			result.Notice = fmt.Sprintf("已用本地回顾补齐模型未覆盖的 %d 项事项。", supplemented)
+		case !synthesis.Shortened:
+			result.Summary = synthesis.Summary
 		}
 	}
 	result.Markdown = renderWorkReport(result, from, to)
@@ -286,15 +277,15 @@ func (a *app) report(w http.ResponseWriter, r *http.Request) {
 
 func reportTopic(topic distill.Topic, roles map[string]string, during map[string]int) (distill.Topic, bool) {
 	if len(topic.ReviewHistory) == 0 {
-		return reportContribution(topic, roles, during)
+		return reportContribution(topic, roles, during, false)
 	}
 	var entry distill.Topic
 	found := false
-	for _, change := range topic.ReviewHistory {
+	for index, change := range topic.ReviewHistory {
 		part, include := reportContribution(distill.Topic{
 			Title: topic.Problem, Problem: topic.Problem, Approach: change.Approach,
 			Outcome: change.Outcome, Status: change.Status, Evidence: change.Evidence,
-		}, roles, during)
+		}, roles, during, index > 0)
 		if !include {
 			continue
 		}
@@ -312,7 +303,7 @@ func reportTopic(topic distill.Topic, roles map[string]string, during map[string
 	return entry, found
 }
 
-func reportContribution(topic distill.Topic, roles map[string]string, during map[string]int) (distill.Topic, bool) {
+func reportContribution(topic distill.Topic, roles map[string]string, during map[string]int, continuation bool) (distill.Topic, bool) {
 	var questions, answers []string
 	answerOutside := false
 	for _, id := range topic.Evidence {
@@ -337,144 +328,226 @@ func reportContribution(topic distill.Topic, roles map[string]string, during map
 	if len(questions) == 0 {
 		return distill.Topic{}, false
 	}
-	if answerOutside || len(answers) == 0 && (topic.Approach != "" || topic.Outcome != "") {
+	if continuation && !answerOutside && topic.Status == "open" && topic.Approach == "" && topic.Outcome == "" {
+		topic.Evidence = questions
+		return topic, true
+	}
+	problem := strings.TrimSpace(topic.Problem)
+	if answerOutside || topic.Approach != "" || topic.Outcome != "" || topic.Status == "open" ||
+		strings.HasSuffix(problem, "？") || strings.HasSuffix(problem, "?") {
 		topic.Approach, topic.Outcome, topic.Status = "", "", ""
-		topic.Title = topic.Problem
+		if problem != "" {
+			topic.Title = problem
+		}
 	}
 	topic.Evidence = questions
 	return topic, true
-}
-
-func localReportSections(groups []reportFactGroup, layout reportLayout) ([]reportSection, bool) {
-	type section struct {
-		items  []reportItem
-		titles map[string]int
-		texts  map[string]int
-	}
-	var sections [len(reportCategories)]section
-	for i := range sections {
-		sections[i].titles = make(map[string]int)
-		sections[i].texts = make(map[string]int)
-	}
-	shortened := false
-	for _, group := range groups {
-		for _, fact := range group.facts {
-			topic := fact.topic
-			category := distill.ReportCategoryFor(topic.Status, topic.Outcome)
-			index := slices.Index(reportCategories[:], category)
-			parts := []string{topic.Outcome, topic.Approach, topic.Problem}
-			switch category {
-			case distill.ReportOutcome:
-				parts = []string{topic.Outcome}
-			case distill.ReportFollowup:
-				parts = []string{topic.Outcome, topic.Approach, topic.Problem}
-			case distill.ReportQuestion:
-				parts = []string{topic.Problem}
-			}
-			title := reportLine(topic.Title)
-			if title == "" {
-				title = reportLine(topic.Problem)
-			}
-			if title == "" {
-				continue
-			}
-			title, clipped := limitReportLine(title, 90)
-			shortened = shortened || clipped
-			bucket, titleKey := &sections[index], reportTextKey(title)
-			row, exists := bucket.titles[titleKey]
-			var text []string
-			for _, part := range parts {
-				part = reportLine(part)
-				if key := reportTextKey(part); key != "" && key != titleKey && !slices.ContainsFunc(text, func(previous string) bool { return reportTextKey(previous) == key }) {
-					text = append(text, part)
-				}
-			}
-			if !exists && len(text) > 0 {
-				row, exists = bucket.texts[reportTextKey(text[0])]
-			}
-			if !exists {
-				if len(bucket.items) == layout.limit {
-					shortened = true
-					continue
-				}
-				row = len(bucket.items)
-				bucket.items = append(bucket.items, reportItem{Title: title})
-			}
-			item := &bucket.items[row]
-			supported := len(text) == 0 && item.Title == title
-			for _, part := range text {
-				key := reportTextKey(part)
-				if slices.ContainsFunc(strings.Split(item.Text, " / "), func(previous string) bool { return reportTextKey(previous) == key }) {
-					supported = true
-					continue
-				}
-				separator := ""
-				if item.Text != "" {
-					separator = " / "
-				}
-				space := 180 - utf8.RuneCountInString(item.Text) - len(separator)
-				if space <= 0 {
-					shortened = true
-					break
-				}
-				part, clipped := limitReportLine(part, space)
-				shortened = shortened || clipped
-				item.Text += separator + part
-				bucket.texts[key] = row
-				supported = true
-				break
-			}
-			if supported {
-				bucket.titles[titleKey] = row
-				item.Sources = mergeReportSources(item.Sources, fact.sources)
-			}
-		}
-	}
-	result := []reportSection{}
-	remaining := layout.limit
-	for index, section := range sections {
-		if len(section.items) == 0 {
-			continue
-		}
-		reserved := 0
-		for _, later := range sections[index+1:] {
-			if len(later.items) > 0 {
-				reserved++
-			}
-		}
-		count := min(len(section.items), remaining-reserved)
-		shortened = shortened || count < len(section.items)
-		result = append(result, reportSection{Title: layout.heading(index), Items: section.items[:count]})
-		remaining -= count
-	}
-	return result, shortened
 }
 
 func reportLine(text string) string {
 	return strings.Join(strings.Fields(text), " ")
 }
 
-func reportTextKey(text string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) || unicode.IsPunct(r) {
-			return -1
-		}
-		return unicode.ToLower(r)
-	}, text)
+var reportPrivateText = regexp.MustCompile(`(?i)(?:[a-z]:[\/]|\\|(?:\.\.?|~)?/)[\pL\pN_@.+=%$~:/\\-]+|[\pL\pN_@.-]+(?:[\/][\pL\pN_@.+-]+)+|\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b`)
+
+type reportEntry struct {
+	local   reportItem
+	model   distill.ReportFact
+	project int
 }
 
-func limitReportLine(text string, limit int) (string, bool) {
-	if utf8.RuneCountInString(text) <= limit {
-		return text, false
+func prepareReportFacts(groups []reportFactGroup, forModel bool) []reportEntry {
+	type workKey struct {
+		project [3]string
+		problem string
 	}
-	return string([]rune(text)[:limit-1]) + "…", true
+	work := map[workKey]int{}
+	projects := map[[3]string]int{}
+	type projectFacts struct {
+		core, other []reportEntry
+	}
+	var buckets []projectFacts
+	type duplicateKey struct {
+		work                              int
+		title, problem, approach, outcome string
+		status                            string
+	}
+	dedup := map[duplicateKey]int{}
+	var entries []reportEntry
+	var projectNames []string
+	if forModel {
+		seen := make(map[string]bool)
+		for _, group := range groups {
+			if name := group.session.Project; name != "" && !seen[name] {
+				projectNames = append(projectNames, name)
+				seen[name] = true
+			}
+		}
+	}
+	for _, group := range groups {
+		project, known := group.project, group.project[2] != ""
+		index, exists := projects[project]
+		if !exists {
+			index = len(buckets)
+			buckets = append(buckets, projectFacts{})
+			projects[project] = index
+		}
+		for _, fact := range group.facts {
+			topic := fact.topic
+			entry := reportEntry{local: localReportItem(topic, fact.sources), project: index}
+			var workID int
+			if key := (workKey{project, reportLine(topic.Problem)}); known && topic.Status != "" && key.problem != "" {
+				workID = work[key]
+				if workID == 0 {
+					workID = len(work) + 1
+					work[key] = workID
+				}
+				key := duplicateKey{workID, topic.Title, topic.Problem, topic.Approach, topic.Outcome, topic.Status}
+				if previous, exists := dedup[key]; exists {
+					old := &entries[previous].local
+					old.Sources = mergeReportSources(old.Sources, fact.sources)
+					continue
+				}
+				dedup[key] = len(entries)
+			}
+
+			entry.model = distill.ReportFact{Status: topic.Status, Type: reportTypeFor(topic), Work: workID}
+			if forModel {
+				fillReportModelFact(&entry.model, group.session, fact, projectNames)
+				if known {
+					entry.model.Project = fmt.Sprintf("P%d", index+1)
+				}
+			}
+			entries = append(entries, entry)
+		}
+	}
+	for _, entry := range entries {
+		bucket := &buckets[entry.project]
+		if primaryReportStatus(entry.model.Status) {
+			bucket.core = append(bucket.core, entry)
+		} else {
+			bucket.other = append(bucket.other, entry)
+		}
+	}
+	ordered := make([]reportEntry, 0, len(entries))
+	for _, core := range []bool{true, false} {
+		for round := 0; ; round++ {
+			before := len(ordered)
+			for _, bucket := range buckets {
+				facts := bucket.other
+				if core {
+					facts = bucket.core
+				}
+				if round < len(facts) {
+					ordered = append(ordered, facts[round])
+				}
+			}
+			if before == len(ordered) {
+				break
+			}
+		}
+	}
+	return ordered
+}
+
+func fillReportModelFact(model *distill.ReportFact, item sessions.Session, fact reportFact, projectNames []string) {
+	values := []string{item.Path, item.SourceRoot, item.Cwd, item.ProjectPath, item.ProjectDisplayPath, item.ID, item.ParentID}
+	values = append(values, projectNames...)
+	for _, source := range fact.sources {
+		values = append(values, source.MessageID)
+	}
+	slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
+	var replacements []string
+	for _, value := range values {
+		if value != "" {
+			replacements = append(replacements, value, "[本地信息]")
+		}
+	}
+	redact := strings.NewReplacer(replacements...)
+	clean := func(text string) string {
+		return reportPrivateText.ReplaceAllString(reportLine(redact.Replace(text)), "[本地信息]")
+	}
+	model.Title = clean(fact.topic.Title)
+	model.Problem = clean(fact.topic.Problem)
+	model.Approach = clean(fact.topic.Approach)
+	model.Outcome = clean(fact.topic.Outcome)
+}
+
+func reportNoise(topic distill.Topic) bool {
+	if topic.Status == "open" || topic.Status == "" || topic.Outcome != "" {
+		return false
+	}
+	for _, text := range []string{topic.Title, topic.Problem, topic.Approach} {
+		switch strings.ToLower(strings.Trim(reportLine(text), "。.!！")) {
+		case "", "提交代码", "暂存代码", "推送代码", "切换分支", "查看目录", "确认环境", "git status", "git add", "git commit", "git push":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func reportTypeFor(topic distill.Topic) distill.ReportType {
+	if topic.Status == "" {
+		return distill.ReportQuestion
+	}
+	text := strings.ToLower(topic.Title + " " + topic.Problem)
+	for _, rule := range []struct {
+		kind  distill.ReportType
+		terms []string
+	}{
+		{distill.ReportBugfix, []string{"缺陷", "bug", "修复", "排查", "异常", "崩溃", "回归失败"}},
+		{distill.ReportResearch, []string{"调研", "学习", "对比方案", "技术选型", "研究"}},
+		{distill.ReportOps, []string{"优化", "重构", "部署", "迁移", "升级", "发布", "配置", "运维", "维护", "性能"}},
+		{distill.ReportTesting, []string{"测试", "联调", "验收", "回归", "压测"}},
+		{distill.ReportFeature, []string{"需求", "新增", "功能", "实现", "开发", "支持"}},
+	} {
+		for _, term := range rule.terms {
+			if strings.Contains(text, term) {
+				return rule.kind
+			}
+		}
+	}
+	return distill.ReportOther
+}
+
+func reportStatus(status string) string {
+	switch status {
+	case "verified":
+		return "已验证"
+	case "resolved":
+		return "已解决"
+	case "open":
+		return "待跟进"
+	case "":
+		return "待确认"
+	default:
+		return "已观察"
+	}
+}
+
+func localReportItem(topic distill.Topic, sources []reportSource) reportItem {
+	title := reportLine(topic.Title)
+	if title == "" {
+		title = reportLine(topic.Problem)
+	}
+	var text []string
+	fields := []string{topic.Outcome, topic.Approach, topic.Problem}
+	if topic.Status == "verified" || topic.Status == "resolved" {
+		fields = []string{topic.Outcome, topic.Approach}
+	} else if topic.Status == "" {
+		fields = []string{topic.Problem}
+	}
+	for _, field := range fields {
+		if part := reportLine(field); part != "" && part != title && !slices.Contains(text, part) {
+			text = append(text, part)
+		}
+	}
+	return reportItem{Title: title, Text: strings.Join(text, " / "), Status: reportStatus(topic.Status), Sources: sources}
 }
 
 func mergeReportSources(base, sources []reportSource) []reportSource {
 	for _, source := range sources {
-		if len(base) == 24 {
-			break
-		}
 		if !slices.Contains(base, source) {
 			base = append(base, source)
 		}
@@ -482,64 +555,107 @@ func mergeReportSources(base, sources []reportSource) []reportSource {
 	return base
 }
 
-var reportPrivateText = regexp.MustCompile(`(?i)(?:[a-z]:[\\/]|\\\\|(?:\.\.?|~)?/)[\pL\pN_@.+=%$~:/\\-]+|[\pL\pN_@.-]+(?:[\\/][\pL\pN_@.+-]+)+|\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b`)
+func primaryReportStatus(status string) bool {
+	return status == "verified" || status == "resolved" || status == "open"
+}
 
-func prepareReportFacts(groups []reportFactGroup) ([]distill.ReportFact, [][]reportSource) {
-	var projects [][]reportFactGroup
-	byProject := map[[3]string]int{}
-	for _, group := range groups {
-		index, exists := byProject[group.project]
-		if !exists {
-			index = len(projects)
-			byProject[group.project] = index
-			projects = append(projects, nil)
-		}
-		projects[index] = append(projects[index], group)
+func reportSections(facts []reportEntry, items []distill.ReportItem, limit int) ([]reportSection, int) {
+	type typedRow struct {
+		kind distill.ReportType
+		core bool
+		item reportItem
 	}
-	type cursor struct{ group, fact int }
-	positions := make([]cursor, len(projects))
-	var facts []distill.ReportFact
-	var sources [][]reportSource
-	for {
-		before := len(facts)
-		for i, groups := range projects {
-			p := &positions[i]
-			if p.group >= len(groups) {
-				continue
+	var rows []typedRow
+	included := make([]bool, len(facts))
+	for _, item := range items {
+		row := typedRow{kind: item.Type, item: reportItem{Title: item.Title, Text: item.Text}}
+		var statuses []string
+		for _, source := range item.Sources {
+			index := source - 1
+			fact := facts[index]
+			included[index] = true
+			row.core = row.core || primaryReportStatus(fact.model.Status)
+			row.item.Sources = mergeReportSources(row.item.Sources, fact.local.Sources)
+			if !slices.Contains(statuses, fact.local.Status) {
+				statuses = append(statuses, fact.local.Status)
 			}
-			group := groups[p.group]
-			fact := group.facts[p.fact]
-			p.fact++
-			if p.fact == len(group.facts) {
-				p.group, p.fact = p.group+1, 0
-			}
-			item := group.session
-			values := []string{item.Path, item.SourceRoot, item.Cwd, item.ProjectPath, item.ProjectDisplayPath, item.ID, item.ParentID}
-			for _, source := range fact.sources {
-				values = append(values, source.MessageID)
-			}
-			slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
-			var replacements []string
-			for _, value := range values {
-				if value != "" {
-					replacements = append(replacements, value, "[本地信息]")
+			if fact.model.Status == "open" {
+				pending := fact.local.Text
+				if pending == "" {
+					pending = fact.local.Title
+				}
+				if !strings.Contains(row.item.Text, pending) {
+					row.item.Text += " 待跟进：" + pending
 				}
 			}
-			redact := strings.NewReplacer(replacements...)
-			clean := func(text string) string {
-				return reportPrivateText.ReplaceAllString(reportLine(redact.Replace(text)), "[本地信息]")
-			}
-			topic := fact.topic
-			facts = append(facts, distill.ReportFact{
-				Title: clean(topic.Title), Problem: clean(topic.Problem), Approach: clean(topic.Approach),
-				Outcome: clean(topic.Outcome), Status: topic.Status,
-			})
-			sources = append(sources, fact.sources)
 		}
-		if len(facts) == before {
-			return facts, sources
+		row.item.Status = strings.Join(statuses, "、")
+		rows = append(rows, row)
+	}
+	supplemented := 0
+	localWork := make(map[int]int)
+	merged := make(map[int]bool)
+	for i, fact := range facts {
+		if included[i] {
+			continue
+		}
+		supplemented++
+		kind, work := fact.model.Type, fact.model.Work
+		if previous, exists := localWork[work]; exists {
+			row := &rows[previous]
+			if !merged[work] {
+				row.item.Text = reportStatusDetail(row.item)
+				merged[work] = true
+			}
+			row.item.Text += " / " + reportStatusDetail(fact.local)
+			if !slices.Contains(strings.Split(row.item.Status, "、"), fact.local.Status) {
+				row.item.Status += "、" + fact.local.Status
+			}
+			if row.kind == distill.ReportOther {
+				row.kind = kind
+			}
+			row.core = row.core || primaryReportStatus(fact.model.Status)
+			row.item.Sources = mergeReportSources(row.item.Sources, fact.local.Sources)
+			continue
+		}
+		if work != 0 {
+			localWork[work] = len(rows)
+		}
+		rows = append(rows, typedRow{kind, primaryReportStatus(fact.model.Status), fact.local})
+	}
+	main, supplemental := make(map[distill.ReportType][]reportItem), make(map[distill.ReportType][]reportItem)
+	for _, core := range []bool{true, false} {
+		for _, row := range rows {
+			if row.core != core {
+				continue
+			}
+			if limit > 0 {
+				main[row.kind] = append(main[row.kind], row.item)
+				limit--
+			} else {
+				supplemental[row.kind] = append(supplemental[row.kind], row.item)
+			}
 		}
 	}
+	result := []reportSection{}
+	for _, section := range reportTypes {
+		if rows := main[section.kind]; len(rows) > 0 {
+			result = append(result, reportSection{Title: section.title, Items: rows})
+		}
+	}
+	for _, section := range reportTypes {
+		if rows := supplemental[section.kind]; len(rows) > 0 {
+			result = append(result, reportSection{Title: section.title, Items: rows, Supplemental: true})
+		}
+	}
+	return result, supplemented
+}
+
+func reportStatusDetail(item reportItem) string {
+	if item.Text == "" {
+		return item.Status + "：" + item.Title
+	}
+	return item.Status + "：" + item.Title + " · " + item.Text
 }
 
 var reportMarkdownEscapes = strings.NewReplacer(`\`, `\\`, "`", "\\`", "*", `\*`, "_", `\_`, "[", `\[`, "]", `\]`, "<", `\<`, ">", `\>`, "&", `\&`, "#", `\#`, "!", `\!`, "~", `\~`, "|", `\|`, "-", `\-`, "+", `\+`, "=", `\=`, ".", `\.`, "(", `\(`, ")", `\)`)
@@ -552,9 +668,16 @@ func renderWorkReport(report workReport, from, to time.Time) string {
 		fmt.Fprintf(&output, "\n%s\n", escape(report.Summary))
 	}
 	for _, section := range report.Sections {
-		fmt.Fprintf(&output, "\n## %s\n\n", escape(section.Title))
+		heading := section.Title
+		if section.Supplemental {
+			heading = "补充事项 · " + heading
+		}
+		fmt.Fprintf(&output, "\n## %s\n\n", escape(heading))
 		for _, item := range section.Items {
 			fmt.Fprintf(&output, "- **%s**", escape(item.Title))
+			if item.Status != "" {
+				fmt.Fprintf(&output, " · %s", escape(item.Status))
+			}
 			if item.Text != "" {
 				fmt.Fprintf(&output, " · %s", escape(item.Text))
 			}
@@ -570,7 +693,7 @@ func renderWorkReport(report workReport, from, to time.Time) string {
 			output.WriteByte('\n')
 		}
 	}
-	fmt.Fprintf(&output, "\n已提炼 %d / %d 条期间会话，收录 %d 个主题。\n", report.Coverage.Ready, report.Coverage.Active, report.Coverage.Topics)
+	fmt.Fprintf(&output, "\n已提炼 %d / %d 条期间会话，共 %d 项期间回顾。\n", report.Coverage.Ready, report.Coverage.Active, report.Coverage.Topics)
 	if report.Mode == "model" {
 		output.WriteString("\n模型草稿，请按依据核对关键结论。\n")
 	}

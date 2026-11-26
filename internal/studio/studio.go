@@ -38,7 +38,6 @@ type app struct {
 	data           string
 	discoveryNonce string
 	review         reviewWorker
-	reviewIdle     time.Duration
 	revisions      map[string]string
 }
 
@@ -93,7 +92,7 @@ func New(reader *sessions.Store, data string, demo bool) (*app, error) {
 	if !demo && data != "" && reader != nil {
 		reader.SetCachePath(filepath.Join(data, "sessions-cache.v1.zst"))
 	}
-	a := &app{reader: reader, db: db, demo: demo, data: data, discoveryNonce: rand.Text(), reviewIdle: reviewIdleDelay, sources: map[string][]string{}, keys: connectionKeys{values: map[string]string{}}}
+	a := &app{reader: reader, db: db, demo: demo, data: data, discoveryNonce: rand.Text(), sources: map[string][]string{}, keys: connectionKeys{values: map[string]string{}}}
 	var config string
 	if err := db.QueryRow(`SELECT content FROM settings WHERE name='sources'`).Scan(&config); err == nil {
 		if err := json.Unmarshal([]byte(config), &a.sources); err != nil {

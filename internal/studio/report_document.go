@@ -87,7 +87,16 @@ func (a *app) saveReportDraft(w http.ResponseWriter, r *http.Request) {
 		DraftRevision  *int64          `json:"draftRevision"`
 		ReportRevision int64           `json:"reportRevision"`
 	}
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	// Leave room for edits to reports that already exceed the default body limit.
+	maxBytes := int64(1 << 20)
+	var savedBytes int64
+	err := a.db.QueryRowContext(r.Context(), `SELECT max(length(CAST(report AS BLOB)), coalesce(length(CAST(draft AS BLOB)), 0))
+		FROM report_documents WHERE scope=?`, scope).Scan(&savedBytes)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "无法读取已保存的报告", http.StatusInternalServerError)
+		return
+	}
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBytes+savedBytes))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&input); err != nil || d.Decode(new(any)) != io.EOF || input.DraftRevision == nil ||
 		*input.DraftRevision < 0 || len(input.Draft) == 0 {
@@ -110,7 +119,7 @@ func (a *app) saveReportDraft(w http.ResponseWriter, r *http.Request) {
 	var result struct {
 		DraftRevision int64 `json:"draftRevision"`
 	}
-	err := a.db.QueryRowContext(r.Context(), `UPDATE report_documents SET draft=?, draft_revision=draft_revision+1
+	err = a.db.QueryRowContext(r.Context(), `UPDATE report_documents SET draft=?, draft_revision=draft_revision+1
 		WHERE scope=? AND draft_revision=? AND (? IS NOT NULL OR report_revision=?) RETURNING draft_revision`,
 		draft, scope, *input.DraftRevision, draft, input.ReportRevision).Scan(&result.DraftRevision)
 	switch {

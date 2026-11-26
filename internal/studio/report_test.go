@@ -47,11 +47,14 @@ func TestReportSynthesisUsesOnlyScopedReviewFacts(t *testing.T) {
 			Evidence: []string{item.Messages[0].ID, item.Messages[1].ID},
 		}}
 		if item.ID == api.ID {
-			topics[0].Approach = "采用唯一键，详见 " + api.ProjectPath + " " + api.ID + " " + api.Messages[1].ID
+			topics[0].Approach = "采用唯一键，详见 " + api.Project + " " + api.ProjectPath + " " + api.ID + " " + api.Messages[1].ID
 			topics = append(topics, distill.Topic{
 				Title: "近日切换完成 FUTURE_TITLE", Problem: "确认切换方案", Outcome: "FUTURE_RESULT", Status: "verified",
 				Evidence: []string{item.Messages[0].ID, item.Messages[2].ID},
 			})
+		}
+		if item.ID == queue.ID {
+			topics[0].Approach = "采用同样的唯一键，也可参照 " + api.Project
 		}
 		insertLegacyReview(t, a, item, topics)
 	}
@@ -80,8 +83,8 @@ func TestReportSynthesisUsesOnlyScopedReviewFacts(t *testing.T) {
 				distill.ReportFact
 			}
 			if err := json.Unmarshal([]byte(input), &facts); err != nil || len(facts) != 3 ||
-				facts[0].Source != 1 || facts[0].Outcome != "重复支付已拦截" ||
-				facts[1].Source != 2 || facts[1].Outcome != "重复通知已拦截" ||
+				facts[0].Source != 1 || facts[0].Project != "P1" || facts[0].Outcome != "重复支付已拦截" ||
+				facts[1].Source != 2 || facts[1].Project != "P2" || facts[1].Outcome != "重复通知已拦截" ||
 				facts[2].Source != 3 || facts[2].Problem != "确认切换方案" || facts[2].Status != "" {
 				t.Errorf("scope/order of summary facts is wrong: %s (%v)", input, err)
 			}
@@ -90,14 +93,14 @@ func TestReportSynthesisUsesOnlyScopedReviewFacts(t *testing.T) {
 					t.Errorf("provider request leaked %q: %s", private, input)
 				}
 			}
-			content := `{"sections":[{"category":"outcome","items":[{"title":"重复写入防护","text":"支付与通知重放均已拦截重复写入。","sources":[1,2,1]}]}]}`
+			content := `{"items":[{"type":"bugfix","title":"重复写入防护","text":"已拦截重复支付。","sources":[1]}]}`
 			if call == 2 {
-				content = strings.Replace(content, "[1,2,1]", "[1,999]", 1)
+				content = strings.Replace(content, "[1]", "[1,2]", 1)
 			} else if call == 3 {
 				http.Error(w, "PRIVATE_PROVIDER_ERROR", http.StatusBadGateway)
 				return
 			} else if call == 4 {
-				content = strings.Replace(content, "[1,2,1]", "[3]", 1)
+				content = strings.Replace(content, "[1]", "[3]", 1)
 			}
 			fmt.Fprintf(w, `{"choices":[{"message":{"content":%q}}]}`, content)
 		default:
@@ -125,15 +128,16 @@ func TestReportSynthesisUsesOnlyScopedReviewFacts(t *testing.T) {
 		filtered.Coverage.Topics != 2 || strings.Contains(filtered.Markdown, "Relay Worker") || calls.Load() != 0 || catalogs.Load() != 0 {
 		t.Fatalf("unexpected local report or traffic: %+v; filtered %+v", local, filtered)
 	}
-	if len(local.Sections) != 2 || local.Sections[1].Title != "期间记录的问题" || len(local.Sections[0].Items) != 1 ||
-		!strings.Contains(local.Sections[0].Items[0].Text, "重复通知已拦截") {
-		t.Fatalf("local report should merge outcomes across projects: %+v", local)
+	if len(local.Sections) != 2 || local.Sections[1].Title != "期间记录的问题" || len(local.Sections[0].Items) != 2 ||
+		local.Sections[0].Items[0].Title != local.Sections[0].Items[1].Title ||
+		!strings.Contains(local.Sections[0].Items[1].Text, "重复通知已拦截") {
+		t.Fatalf("local report should keep same-title outcomes from each project: %+v", local)
 	}
 	model := request(http.MethodPost, path, body)
-	wantSources := []string{api.Messages[0].ID, api.Messages[1].ID, queue.Messages[0].ID, queue.Messages[1].ID}
-	if model.Mode != "model" || model.Summary != "" || model.Coverage != local.Coverage || model.Sections[0].Title != "主题进展" ||
+	wantSources := []string{api.Messages[0].ID, api.Messages[1].ID, queue.Messages[0].ID, queue.Messages[1].ID, api.Messages[0].ID}
+	if model.Mode != "model" || model.Summary != "" || model.Coverage != local.Coverage || model.Sections[0].Title != "缺陷排查与修复" || !strings.Contains(model.Notice, "2 项事项") ||
 		!slices.Equal(reportSourceIDs(model), wantSources) ||
-		!strings.Contains(model.Markdown, "支付与通知重放均已拦截重复写入") || strings.Contains(model.Markdown, api.ID) {
+		!strings.Contains(model.Markdown, "已拦截重复支付") || strings.Contains(model.Markdown, api.ID) {
 		t.Fatalf("unexpected model report or sources: %+v", model)
 	}
 	if source := model.Sections[0].Items[0].Sources[0]; source.EvidenceVersion != messageEvidenceVersion(api.Messages[0]) {
@@ -148,6 +152,106 @@ func TestReportSynthesisUsesOnlyScopedReviewFacts(t *testing.T) {
 	}
 	if calls.Load() != 4 {
 		t.Fatalf("expected four explicit calls, got %d", calls.Load())
+	}
+}
+
+func TestReportLocallyCompletesModelOmissions(t *testing.T) {
+	item := reviewTestSession()
+	item.ProjectPath = "/home/test/private-project"
+	item.Messages = nil
+	var topics []distill.Topic
+	for i := 1; i <= 10; i++ {
+		ask, answer := fmt.Sprint("ask-", i), fmt.Sprint("answer-", i)
+		item.Messages = append(item.Messages,
+			sessions.Message{ID: ask, Role: "user", Text: "核对结果", Timestamp: item.Updated},
+			sessions.Message{ID: answer, Role: "assistant", Text: "已核对", Timestamp: item.Updated},
+		)
+		topics = append(topics, distill.Topic{
+			Title: "回归验证", Problem: fmt.Sprint("检查功能 ", i), Outcome: fmt.Sprint("本地结果 ", i),
+			Status: "verified", Evidence: []string{ask, answer},
+		})
+	}
+	a := openReviewTestApp(t, t.TempDir(), item)
+	insertLegacyReview(t, a, item, topics)
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			fmt.Fprint(w, `{"data":[{"id":"review-test","context_window":4096,"max_output_tokens":384}]}`)
+		case "/v1/chat/completions":
+			var body struct{ Messages []struct{ Content string } }
+			var packed []struct{ Source int }
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Messages) != 2 ||
+				json.Unmarshal([]byte(body.Messages[1].Content), &packed) != nil || len(packed) != 10 {
+				t.Errorf("expected ten scoped facts, got %+v (%v)", body, err)
+			}
+			var rows []distill.ReportItem
+			for i := 1; i <= 6; i++ {
+				rows = append(rows, distill.ReportItem{Title: "回归验证", Text: fmt.Sprint("模型结果 ", i), Type: distill.ReportTesting, Sources: []int{i}})
+			}
+			content, _ := json.Marshal(distill.ReportSynthesis{Items: rows})
+			fmt.Fprintf(w, `{"choices":[{"message":{"content":%q}}]}`, content)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	profile := configureReviewTest(t, a, gateway)
+	path := "/api/report?" + strings.Replace(reviewTestWindow, "custom", "daily", 1)
+	body := fmt.Sprintf(`{"connectionId":%q}`, profile.ID)
+	result := decodeTestReport(t, []byte(reviewTestRequest(t, a, http.MethodPost, path, body)))
+	if result.Mode != "model" || result.Coverage.Topics != 10 || !strings.Contains(result.Notice, "4 项事项") ||
+		len(result.Sections) != 1 || len(result.Sections[0].Items) != 10 || result.Sections[0].Supplemental ||
+		strings.Count(result.Markdown, "模型结果") != 6 || strings.Count(result.Markdown, "本地结果") != 4 || len(reportSourceIDs(result)) != 20 {
+		t.Fatalf("expected six model rows and all four local omissions, with evidence: %+v", result)
+	}
+}
+
+func TestReportKeepsUnansweredQuestionsSeparateFromFollowUps(t *testing.T) {
+	question := distill.Topic{Title: "排查导入失败", Problem: "为什么导入会失败？", Status: "open", Evidence: []string{"ask"}}
+	topic, ok := reportTopic(question, map[string]string{"ask": "user"}, map[string]int{"ask": 0})
+	if !ok || reportTypeFor(topic) != distill.ReportQuestion || reportStatus(topic.Status) != "待确认" ||
+		topic.Title != question.Problem || !slices.Equal(topic.Evidence, question.Evidence) {
+		t.Fatalf("expected an unanswered question with its original evidence: %+v", topic)
+	}
+}
+
+func TestReportCombinesOnlyStronglyAssociatedWork(t *testing.T) {
+	fact := func(problem, status, outcome string) reportFact {
+		return reportFact{topic: distill.Topic{Title: "验证构建", Problem: problem, Status: status, Outcome: outcome},
+			sources: []reportSource{{MessageID: outcome}}}
+	}
+	first := reportFactGroup{project: [3]string{"native", "", "/first"}, facts: []reportFact{
+		fact("检查 C++  编译", "verified", "构建通过"),
+		fact("检查 C++ 编译", "open", "仍需验证交叉编译"),
+		fact("检查 C 编译", "resolved", "已有解决方式"),
+		fact("检查 c++ 编译", "resolved", "大小写不同"),
+		fact("检查 C++ 编译", "", "问题仍待回复"),
+	}}
+	second := reportFactGroup{project: [3]string{"native", "", "/second"}, facts: []reportFact{
+		fact("检查 C++ 编译", "verified", "另一项目已验证"),
+	}}
+	unknown := reportFactGroup{facts: []reportFact{
+		fact("检查 C++ 编译", "open", "未识别项目的待办"),
+		fact("检查 C++ 编译", "verified", "未识别项目的结论"),
+	}}
+	facts := prepareReportFacts([]reportFactGroup{first, second, unknown}, false)
+	if facts[0].model.Work == 0 || facts[0].model.Work != facts[3].model.Work ||
+		facts[0].model.Work == facts[1].model.Work || facts[0].model.Work == facts[5].model.Work || facts[0].model.Work == facts[6].model.Work ||
+		facts[2].model.Work != 0 || facts[4].model.Work != 0 || facts[7].model.Work != 0 {
+		t.Fatalf("project and original problem must match to associate work: %+v", facts)
+	}
+	local, _ := reportSections(facts, nil, 15)
+	model, _ := reportSections(facts, []distill.ReportItem{{Title: "验证构建", Text: "构建通过。", Type: distill.ReportTesting, Sources: []int{1, 4}}}, 15)
+	single, _ := reportSections(facts, []distill.ReportItem{{Title: "验证构建", Text: "后续处理。", Type: distill.ReportTesting, Sources: []int{4}}}, 15)
+	for _, sections := range [][]reportSection{local, model, single} {
+		item := sections[0].Items[0]
+		if !strings.Contains(item.Status, "待跟进") || !strings.Contains(item.Text, "仍需验证交叉编译") ||
+			len(reportSourceIDs(workReport{Sections: sections})) != 8 {
+			t.Fatalf("expected pending detail and all evidence: %+v", sections)
+		}
+	}
+	if row := local[0].Items[0]; row.Status != "已验证、待跟进" || !strings.Contains(row.Text, "构建通过") || len(row.Sources) != 2 {
+		t.Fatalf("expected one local row for strongly associated work: %+v", row)
 	}
 }
 
@@ -181,15 +285,15 @@ func TestReportDemoAndLocalLength(t *testing.T) {
 	for _, section := range result.Sections {
 		count += len(section.Items)
 	}
-	if result.Mode != "local" || !strings.Contains(result.Notice, "演示工作区") || count != 6 || result.Coverage.Topics <= count || calls.Load() != 0 {
-		t.Fatalf("expected a capped daily preview in demo: %+v", result)
+	if result.Mode != "local" || !strings.Contains(result.Notice, "演示工作区") || count == 0 || count > result.Coverage.Topics || calls.Load() != 0 {
+		t.Fatalf("expected a local demo report without provider traffic: %+v", result)
 	}
 }
 
 func TestCustomReportLayoutUsesCalendarDays(t *testing.T) {
-	for _, test := range []struct{ from, to, heading string }{
-		{"2026-10-31T00:00:00-04:00", "2026-11-03T00:00:00-05:00", "本期成果"},
-		{"2026-02-20T00:00:00-05:00", "2026-03-20T00:00:00-04:00", "里程碑与成果"},
+	for _, test := range []struct{ from, to, layout string }{
+		{"2026-10-31T00:00:00-04:00", "2026-11-03T00:00:00-05:00", "daily"},
+		{"2026-02-20T00:00:00-05:00", "2026-03-20T00:00:00-04:00", "monthly"},
 	} {
 		from, err := time.Parse(time.RFC3339, test.from)
 		if err != nil {
@@ -200,26 +304,29 @@ func TestCustomReportLayoutUsesCalendarDays(t *testing.T) {
 			t.Fatal(err)
 		}
 		layout, _ := reportLayoutFor("custom", from, to)
-		if layout.headings[0] != test.heading {
-			t.Fatalf("got %q for %s to %s, want %q", layout.headings[0], test.from, test.to, test.heading)
+		if layout.focus != reportLayouts[test.layout].focus {
+			t.Fatalf("got %+v for %s to %s, want %s", layout, test.from, test.to, test.layout)
 		}
 	}
 }
 
-func TestLocalReportSourcesSupportDisplayedContent(t *testing.T) {
-	fact := func(id, outcome string) reportFact {
-		return reportFact{
-			topic:   distill.Topic{Title: "回归完成", Outcome: outcome, Status: "verified"},
+func TestLocalReportKeepsDailyOverflowAndEvidence(t *testing.T) {
+	var group reportFactGroup
+	for i := 1; i <= 17; i++ {
+		id := fmt.Sprintf("source-%d", i)
+		group.facts = append(group.facts, reportFact{
+			topic:   distill.Topic{Title: "回归完成", Outcome: "已验证 " + id, Status: "verified"},
 			sources: []reportSource{{SessionID: "session", MessageID: id}},
-		}
+		})
 	}
-	groups := []reportFactGroup{{facts: []reportFact{
-		fact("shown", strings.Repeat("验证", 90)),
-		fact("omitted", "另一个结果"),
-	}}}
-	sections, shortened := localReportSections(groups, reportLayouts["daily"])
-	if !shortened || !slices.Equal(reportSourceIDs(workReport{Sections: sections}), []string{"shown"}) {
-		t.Fatalf("expected only the source for displayed content: %+v", sections)
+	for i := 18; i <= 45; i++ {
+		group.facts[16].sources = append(group.facts[16].sources, reportSource{SessionID: "session", MessageID: fmt.Sprintf("source-%d", i)})
+	}
+	sections, local := reportSections(prepareReportFacts([]reportFactGroup{group}, false), nil, reportLayouts["daily"].limit)
+	if local != 17 || len(sections) != 2 || len(sections[0].Items) != 15 || sections[0].Supplemental ||
+		len(sections[1].Items) != 2 || !sections[1].Supplemental || len(reportSourceIDs(workReport{Sections: sections})) != 45 ||
+		!strings.Contains(sections[1].Items[1].Text, "source-17") {
+		t.Fatalf("expected all daily overflow and evidence: %+v", sections)
 	}
 }
 
