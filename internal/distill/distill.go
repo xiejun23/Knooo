@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -76,7 +77,7 @@ func parseTopics(text string, refs map[string]int) ([]Topic, error) {
 		if opening == "```json" || opening == "```" {
 			text, ok = strings.CutSuffix(body, "\n```")
 			if !ok {
-				return nil, errors.New("distill: invalid model JSON")
+				return nil, errors.New("回复正文的工作回顾 JSON 代码块未闭合")
 			}
 		}
 	}
@@ -84,8 +85,11 @@ func parseTopics(text string, refs map[string]int) ([]Topic, error) {
 	var result struct {
 		Topics []Topic `json:"topics"`
 	}
-	if err := json.Unmarshal([]byte(text), &result); err != nil || result.Topics == nil {
-		return nil, errors.New("distill: invalid model JSON")
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		return nil, errors.New("回复正文不符合工作回顾 JSON 格式，应包含 topics 数组")
+	}
+	if result.Topics == nil {
+		return nil, errors.New("回复正文是 JSON，但缺少有效的 topics 数组")
 	}
 	for i := range result.Topics {
 		topic := &result.Topics[i]
@@ -93,12 +97,12 @@ func parseTopics(text string, refs map[string]int) ([]Topic, error) {
 		topic.EvidenceVersions = nil
 		topic.EvidenceStale = false
 		if strings.TrimSpace(topic.Title) == "" || len(topic.Evidence) == 0 {
-			return nil, errors.New("distill: topic requires a title and evidence")
+			return nil, fmt.Errorf("第 %d 个问题缺少标题或原文依据", i+1)
 		}
 		switch topic.Status {
 		case "verified", "resolved", "open", "observed":
 		default:
-			return nil, errors.New("distill: invalid topic status")
+			return nil, fmt.Errorf("第 %d 个问题的状态无效", i+1)
 		}
 		valid := make([]string, 0, len(topic.Evidence))
 		seen := make(map[string]bool, len(topic.Evidence))
@@ -109,7 +113,7 @@ func parseTopics(text string, refs map[string]int) ([]Topic, error) {
 			}
 		}
 		if len(valid) == 0 {
-			return nil, errors.New("distill: invalid topic evidence reference")
+			return nil, fmt.Errorf("第 %d 个问题未引用本批的有效原文依据", i+1)
 		}
 		topic.Evidence = valid
 	}

@@ -3,7 +3,9 @@ package studio
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -424,6 +426,52 @@ func TestAutomaticReviewBacksOffTransientFailureAndProcessesOtherSessions(t *tes
 	}
 	if len(cached[healthy.ID].Topics) != 1 || cached[healthy.ID].Topics[0].Title != okTopic.Title {
 		t.Fatalf("expected healthy session to finish review: %+v", cached[healthy.ID])
+	}
+}
+
+func TestAutomaticReviewShortWindowSettings(t *testing.T) {
+	a := openReviewTestApp(t, t.TempDir(), reviewTestSession())
+	for _, days := range []int{1, 3, 7, 30, 90, 0} {
+		reviewTestRequest(t, a, "POST", "/api/review-settings", fmt.Sprintf(`{"connectionId":"","maxAgeDays":%d}`, days))
+		body := reviewTestRequest(t, a, "GET", "/api/review-settings", "")
+		var settings struct{ MaxAgeDays *int }
+		if err := json.Unmarshal([]byte(body), &settings); err != nil || settings.MaxAgeDays == nil || *settings.MaxAgeDays != days {
+			t.Fatalf("expected stored scope %d, got %s (%v)", days, body, err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/review-settings", strings.NewReader(`{"connectionId":"","maxAgeDays":2}`))
+	a.routes(http.NotFoundHandler(), "", "").ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid scope to be rejected, got %d: %s", w.Code, w.Body)
+	}
+}
+
+func TestAutomaticReviewShortWindowDateBoundaries(t *testing.T) {
+	zone := time.FixedZone("UTC+8", 8*60*60)
+	now := time.Date(2026, time.November, 26, 11, 0, 0, 0, zone)
+	midnight := time.Date(2026, time.November, 26, 0, 0, 0, 0, zone)
+	threeDaysAgo := now.AddDate(0, 0, -3)
+	for _, tt := range []struct {
+		name    string
+		days    int
+		updated time.Time
+		outside bool
+	}{
+		{"today starts at local midnight", 1, midnight, false},
+		{"yesterday is outside today even within 24 hours", 1, midnight.Add(-time.Nanosecond), true},
+		{"tomorrow is outside today", 1, midnight.AddDate(0, 0, 1), true},
+		{"missing activity cannot be classified as today", 1, time.Time{}, true},
+		{"three days includes the boundary", 3, threeDaysAgo, false},
+		{"three days excludes older activity", 3, threeDaysAgo.Add(-time.Nanosecond), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			item := sessions.Session{Updated: tt.updated.UTC().Format(time.RFC3339Nano)}
+			if got := reviewOutsideWindow(item, tt.days, now); got != tt.outside {
+				t.Errorf("outside window = %t, want %t", got, tt.outside)
+			}
+		})
 	}
 }
 

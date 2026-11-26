@@ -29,7 +29,7 @@ var assets embed.FS
 //go:embed config.json
 var startupConfig []byte
 
-var version = "0.1.1"
+var version = "0.1.2"
 
 func main() {
 	var config struct {

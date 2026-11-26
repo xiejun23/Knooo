@@ -217,7 +217,7 @@ func connection(config Config) (provider, base string, headers http.Header, err 
 func request(ctx context.Context, method, endpoint string, headers http.Header, body io.Reader, transport http.RoundTripper) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
-		return nil, errors.New("distill: could not create model request")
+		return nil, errors.New("无法创建模型请求，请检查 API 地址")
 	}
 	req.Header = headers
 	client := http.Client{
@@ -229,7 +229,7 @@ func request(ctx context.Context, method, endpoint string, headers http.Header, 
 	}
 	response, err := client.Do(req)
 	if err != nil {
-		return nil, requestError(ctx, err, "model request failed")
+		return nil, requestError(ctx, err, "模型请求未能完成，请检查网络和 API 地址")
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -250,19 +250,19 @@ func request(ctx context.Context, method, endpoint string, headers http.Header, 
 			if method == http.MethodGet {
 				return nil, fmt.Errorf("模型目录不可用（HTTP %d），请检查 API 地址（部分服务需要 /v1），或手动填写模型 ID 后测试连接", response.StatusCode)
 			}
-			return nil, fmt.Errorf("模型调用地址或模型不可用（HTTP %d），请检查 API 地址和模型 ID", response.StatusCode)
+			return nil, fmt.Errorf("模型调用地址或模型不可用（HTTP %d），请检查 API 地址、协议和模型 ID", response.StatusCode)
 		}
 		return nil, fmt.Errorf("服务商请求失败（HTTP %d）", response.StatusCode)
 	}
 	if response.ContentLength > maxResponseBytes {
-		return nil, errors.New("distill: model response exceeds size limit")
+		return nil, errors.New("服务商响应体超过大小上限")
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
-		return nil, requestError(ctx, err, "could not read model response")
+		return nil, requestError(ctx, err, "未能读完服务商响应，请检查网络后重试")
 	}
 	if len(data) > maxResponseBytes {
-		return nil, errors.New("distill: model response exceeds size limit")
+		return nil, errors.New("服务商响应体超过大小上限")
 	}
 	return data, nil
 }
@@ -280,7 +280,11 @@ func requestError(ctx context.Context, err error, message string) error {
 	case errors.As(err, &certificate):
 		return errors.New("API 地址的 HTTPS 证书校验失败")
 	}
-	return errors.New("distill: " + message)
+	return errors.New(message)
+}
+
+func missingResponseField(field string) error {
+	return fmt.Errorf("接口响应格式不符合所选协议（缺少 %s 字段），请检查 API 协议和地址", field)
 }
 
 func responseText(provider string, data []byte) (string, error) {
@@ -319,13 +323,16 @@ func responseText(provider string, data []byte) (string, error) {
 		} `json:"candidates"`
 	}
 	if err := json.Unmarshal(data, &response); err != nil {
-		return "", errors.New("distill: invalid provider response")
+		return "", errors.New("接口响应格式无法解析，请检查 API 协议和地址")
 	}
 
 	var text strings.Builder
-	incomplete := errors.New("distill: model did not complete a text response")
+	incomplete := errors.New("接口已响应，但模型未返回完整正文")
 	switch provider {
 	case "openai", "compatible", "gateway":
+		if response.Choices == nil {
+			return "", missingResponseField("choices")
+		}
 		if len(response.Choices) == 0 {
 			return "", incomplete
 		}
@@ -336,13 +343,25 @@ func responseText(provider string, data []byte) (string, error) {
 		if (choice.FinishReason != "" && choice.FinishReason != "stop") || choice.Message.Refusal != "" {
 			return "", incomplete
 		}
-		text.WriteString(choice.Message.Content)
+		content := choice.Message.Content
+		if thinking, ok := strings.CutPrefix(strings.TrimSpace(content), "<think>"); ok {
+			if _, answer, ok := strings.Cut(thinking, "</think>"); ok {
+				content = answer
+			}
+		}
+		text.WriteString(content)
 	case "responses", "gateway-responses":
+		if response.Status == "" {
+			return "", missingResponseField("status")
+		}
 		if response.Status == "incomplete" && response.Incomplete.Reason == "max_output_tokens" {
 			return "", errOutputLimit
 		}
 		if response.Status != "completed" {
 			return "", incomplete
+		}
+		if response.Output == nil {
+			return "", missingResponseField("output")
 		}
 		for _, item := range response.Output {
 			if item.Type != "message" {
@@ -362,12 +381,18 @@ func responseText(provider string, data []byte) (string, error) {
 		default:
 			return "", incomplete
 		}
+		if response.Content == nil {
+			return "", missingResponseField("content")
+		}
 		for _, block := range response.Content {
 			if block.Type == "text" {
 				text.WriteString(block.Text)
 			}
 		}
 	case "gemini":
+		if response.Candidates == nil {
+			return "", missingResponseField("candidates")
+		}
 		if len(response.Candidates) == 0 {
 			return "", incomplete
 		}

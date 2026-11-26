@@ -187,6 +187,8 @@ function DesktopStartupSettings({ api }: { api: API }) {
 }
 
 const reviewScopeOptions = [
+ { days: 1, label: '今天' },
+ { days: 3, label: '最近 3 天' },
  { days: 7, label: '最近 7 天' },
  { days: 30, label: '最近 30 天（推荐）' },
  { days: 90, label: '最近 90 天' },

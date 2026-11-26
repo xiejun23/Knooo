@@ -3,6 +3,7 @@ package studio
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -70,7 +71,9 @@ func TestPlatformLogsPersistReviewRejection(t *testing.T) {
 	}
 	event := payload.Events[0]
 	if event.SessionID != item.ID || event.Action != "回顾内容校验失败" ||
-		!strings.Contains(event.Message, "第 1 个问题：缺少支持做法或结果的 Agent 回复依据") {
+		!strings.Contains(event.Message, "第 1 个问题：缺少支持做法或结果的 Agent 回复依据") ||
+		!strings.Contains(event.Message, "协议：本地网关 · Chat Completions") ||
+		!strings.Contains(event.Message, "模型：review-test") {
 		t.Fatalf("missing session or precise rejection: %+v", event)
 	}
 	if payload.Counts.All < 2 || payload.Counts.Levels["error"] != 1 || payload.Counts.Areas["review"] != 1 {
@@ -80,6 +83,55 @@ func TestPlatformLogsPersistReviewRejection(t *testing.T) {
 		if strings.Contains(response.Body.String(), transcript.Text) {
 			t.Fatal("platform log contains transcript text")
 		}
+	}
+}
+
+func TestPlatformLogsDiagnoseReviewModelFailures(t *testing.T) {
+	const privateReply = "private-provider-reply"
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+		want   []string
+	}{
+		{"authentication", http.StatusUnauthorized, privateReply, []string{"HTTP 401", "API 密钥"}},
+		{"response envelope", http.StatusOK, `{"content":[{"type":"text","text":"` + privateReply + `"}]}`, []string{"接口响应格式", "choices"}},
+		{"review output", http.StatusOK, fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, privateReply), []string{"工作回顾 JSON", "topics"}},
+		{"output limit", http.StatusOK, fmt.Sprintf(`{"choices":[{"finish_reason":"length","message":{"content":%q}}]}`, privateReply), []string{"输出上限", "请求上限"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/models" {
+					fmt.Fprint(w, `{"data":[{"id":"review-test"}]}`)
+					return
+				}
+				if r.URL.Path != "/v1/chat/completions" {
+					t.Errorf("unexpected model path: %s", r.URL.Path)
+				}
+				w.WriteHeader(test.status)
+				fmt.Fprint(w, test.body)
+			}))
+			defer gateway.Close()
+			item := reviewTestSession()
+			a := openReviewTestApp(t, "", item)
+			configureReviewTest(t, a, gateway)
+			a.processReviews(context.Background(), false)
+
+			raw := reviewTestRequest(t, a, http.MethodGet, "/api/logs?area=review&level=error", "")
+			var payload platformLogsResponse
+			if err := json.Unmarshal([]byte(raw), &payload); err != nil || len(payload.Events) != 1 {
+				t.Fatalf("expected one review error: %s (%v)", raw, err)
+			}
+			event := payload.Events[0]
+			for _, want := range append(test.want, "协议：本地网关 · Chat Completions", "模型：review-test", gateway.URL) {
+				if !strings.Contains(event.Message, want) {
+					t.Errorf("review diagnostics missing %q in %q", want, event.Message)
+				}
+			}
+			if event.SessionID != item.ID || strings.Contains(raw, privateReply) || strings.Contains(raw, gateway.URL+"/v1") {
+				t.Fatalf("unexpected review log contents: %s", raw)
+			}
+		})
 	}
 }
 

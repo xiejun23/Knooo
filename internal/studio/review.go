@@ -23,6 +23,7 @@ const reviewInterval = time.Minute
 const reviewIdleDelay = 2 * time.Hour
 const reviewConcurrency = 3
 const reviewResponseAttempts = 3
+const reviewWindowToday = 1
 
 var errReviewChanged = errors.New("review checkpoint changed")
 var errReviewWindowInvalid = errors.New("自动回顾范围无效，请在本机设置中重新保存")
@@ -171,15 +172,21 @@ const reviewSettingsQuery = `SELECT
 	COALESCE((SELECT content FROM settings WHERE name='review_model'), ''),
 	COALESCE((SELECT content FROM settings WHERE name='review_window_days'), '0')`
 
+func validReviewWindowDays(days int) bool {
+	switch days {
+	case 0, reviewWindowToday, 3, 7, 30, 90:
+		return true
+	default:
+		return false
+	}
+}
+
 func parseReviewWindowDays(raw string) (int, error) {
 	days, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err == nil {
-		switch days {
-		case 0, 7, 30, 90:
-			return days, nil
-		}
+	if err != nil || !validReviewWindowDays(days) {
+		return 0, errReviewWindowInvalid
 	}
-	return 0, errReviewWindowInvalid
+	return days, nil
 }
 
 func (a *app) reviewSettings(ctx context.Context) (string, int, error) {
@@ -230,10 +237,8 @@ func (a *app) setReviewModel(w http.ResponseWriter, r *http.Request) {
 	}
 	days := 0
 	if body.MaxAgeDays != nil {
-		switch *body.MaxAgeDays {
-		case 0, 7, 30, 90:
-			days = *body.MaxAgeDays
-		default:
+		days = *body.MaxAgeDays
+		if !validReviewWindowDays(days) {
 			http.Error(w, "自动提炼范围无效", http.StatusBadRequest)
 			return
 		}
@@ -694,6 +699,13 @@ func (a *app) processReviews(ctx context.Context, scan bool) {
 		delete(running, result.id)
 		a.review.Unlock()
 		if event.Level != "" {
+			if event.Level == "error" {
+				identity := formatModelIdentity(modelConnection{}, config)
+				if origin := safeLogURL(config.BaseURL); origin != "" {
+					identity += " · 地址：" + origin
+				}
+				event.Message += "\n" + identity
+			}
 			a.recordEvent(event)
 		}
 	}
@@ -914,7 +926,12 @@ func reviewOutsideWindow(item sessions.Session, maxAgeDays int, now time.Time) b
 	}
 	latest := latestActivity(item)
 	if latest.IsZero() {
-		return false
+		return maxAgeDays == reviewWindowToday
+	}
+	if maxAgeDays == reviewWindowToday {
+		year, month, day := now.Date()
+		activityYear, activityMonth, activityDay := latest.In(now.Location()).Date()
+		return activityYear != year || activityMonth != month || activityDay != day
 	}
 	return latest.Before(now.AddDate(0, 0, -maxAgeDays))
 }

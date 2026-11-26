@@ -154,6 +154,38 @@ func TestGenerateProviders(t *testing.T) {
 	}
 }
 
+func TestGenerateChatReplyWithThinking(t *testing.T) {
+	const thinking = "<think>\nDo not use this draft: {\"topics\":[]}\n</think>"
+	for _, tt := range []struct {
+		name, content, wantError string
+	}{
+		{name: "leading thinking before JSON", content: " \n" + thinking + "\n" + topicJSON},
+		{name: "leading thinking before fenced JSON", content: thinking + "\n```json\n" + topicJSON + "\n```"},
+		{name: "separate reasoning", content: topicJSON},
+		{name: "unclosed thinking", content: "<think>\n" + topicJSON, wantError: "回复正文不符合工作回顾 JSON 格式"},
+		{name: "invalid evidence", content: thinking + strings.Replace(topicJSON, `"m1"`, `"unknown"`, 1), wantError: "第 1 个问题未引用本批的有效原文依据"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := testTransport(func(req *http.Request) (*http.Response, error) {
+				defer req.Body.Close()
+				body := `{"choices":[{"finish_reason":"stop","message":{"reasoning_content":"separate draft","content":` + jsonString(tt.content) + `}}]}`
+				return mockResponse(http.StatusOK, body), nil
+			})
+			cfg := Config{Provider: "compatible", BaseURL: "https://api.minimaxi.com/v1", Model: "MiniMax-M3", APIKey: fakeKey}
+			topics, err := generate(context.Background(), cfg, []Input{{ID: "m1", Role: "user", Text: privateText}}, transport)
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) || len(topics) != 0 {
+					t.Fatalf("topics = %v, error = %v, want error containing %q", topics, err, tt.wantError)
+				}
+				return
+			}
+			if err != nil || len(topics) != 1 || topics[0].Title != "Session topic" || !slices.Equal(topics[0].Evidence, []string{"m1"}) {
+				t.Fatalf("topics = %v, error = %v, want the grounded topic", topics, err)
+			}
+		})
+	}
+}
+
 func TestGenerateResponseErrors(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -170,20 +202,31 @@ func TestGenerateResponseErrors(t *testing.T) {
 		}, "HTTP 307"},
 		{"transport error", func() (*http.Response, error) {
 			return nil, errors.New(fakeKey + privateText)
-		}, "model request failed"},
+		}, "模型请求未能完成"},
 		{"oversized declared response", func() (*http.Response, error) {
 			response := mockResponse(http.StatusOK, "")
 			response.ContentLength = maxResponseBytes + 1
 			return response, nil
-		}, "exceeds size limit"},
+		}, "服务商响应体超过大小上限"},
 		{"oversized streamed response", func() (*http.Response, error) {
 			response := mockResponse(http.StatusOK, strings.Repeat(" ", maxResponseBytes+1))
 			response.ContentLength = -1
 			return response, nil
-		}, "exceeds size limit"},
+		}, "服务商响应体超过大小上限"},
 		{"malformed provider response", func() (*http.Response, error) {
 			return mockResponse(http.StatusOK, fakeKey+privateText), nil
-		}, "invalid provider response"},
+		}, "接口响应格式无法解析"},
+		{"unexpected response envelope", func() (*http.Response, error) {
+			return mockResponse(http.StatusOK, `{"content":[{"type":"text","text":`+jsonString(fakeKey+privateText)+`}]}`), nil
+		}, "接口响应格式不符合所选协议（缺少 choices 字段）"},
+		{"invalid review JSON", func() (*http.Response, error) {
+			body := `{"choices":[{"message":{"content":` + jsonString(fakeKey+privateText) + `}}]}`
+			return mockResponse(http.StatusOK, body), nil
+		}, "回复正文不符合工作回顾 JSON 格式"},
+		{"missing topics", func() (*http.Response, error) {
+			body := `{"choices":[{"message":{"content":` + jsonString(`{"answer":`+jsonString(fakeKey+privateText)+`}`) + `}}]}`
+			return mockResponse(http.StatusOK, body), nil
+		}, "回复正文是 JSON，但缺少有效的 topics 数组"},
 		{"truncated completion", func() (*http.Response, error) {
 			body := `{"choices":[{"finish_reason":"length","message":{"content":` + jsonString(topicJSON) + `}}]}`
 			return mockResponse(http.StatusOK, body), nil
@@ -191,7 +234,7 @@ func TestGenerateResponseErrors(t *testing.T) {
 		{"bad evidence", func() (*http.Response, error) {
 			body := `{"choices":[{"message":{"content":` + jsonString(strings.Replace(topicJSON, "m1", privateText, 1)) + `}}]}`
 			return mockResponse(http.StatusOK, body), nil
-		}, "invalid topic evidence reference"},
+		}, "第 1 个问题未引用本批的有效原文依据"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

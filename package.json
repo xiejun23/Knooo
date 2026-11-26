@@ -1,5 +1,5 @@
 {
-  "name": "knooo", "version": "0.1.1", "private": true, "type": "module",
+  "name": "knooo", "version": "0.1.2", "private": true, "type": "module",
   "scripts": {
     "start": "npm run build && go run .",
     "build": "tsc --noEmit && vite build",

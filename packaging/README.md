@@ -27,7 +27,7 @@ npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
 npm run build
 go test ./...
 
-version=0.1.1
+version=0.1.2
 mkdir -p build
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false \
   -ldflags "-H=windowsgui -X main.version=$version" -o build/Knooo-windows-x64.exe .
