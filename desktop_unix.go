@@ -4,10 +4,34 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"runtime"
 )
+
+type desktopHost struct{}
+
+func newDesktopHost(_, tray bool) (*desktopHost, error) {
+	if tray {
+		return nil, fmt.Errorf("--tray 仅支持 Windows")
+	}
+	return &desktopHost{}, nil
+}
+
+func (*desktopHost) close() {}
+
+func showDesktopError(error) {}
+
+func (*desktopHost) run(url, _ string, stop <-chan struct{}) error {
+	go func() {
+		if err := openDesktop(url); err != nil {
+			log.Print(err)
+		}
+	}()
+	<-stop
+	return nil
+}
 
 func openDesktop(url string) error {
 	opener := "xdg-open"

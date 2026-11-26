@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/xiejun23/Knooo/internal/sessions"
@@ -46,67 +47,95 @@ func main() {
 	noOpen := flag.Bool("no-open", false, "Do not open the interface automatically")
 	demo := flag.Bool("demo", false, "Use isolated example data")
 	data := flag.String("data", "", "Application data directory")
+	tray := flag.Bool("tray", false, "Start in the Windows notification area")
 	flag.Parse()
-	canInstall := !*demo && !*noOpen && *listen == "" && *data == ""
-	listener, err := listenLocal(defaultAddress, *listen)
-	if err != nil {
+	if err := run(defaultAddress, *listen, *data, *noOpen, *demo, *tray); err != nil {
+		if !*noOpen {
+			showDesktopError(err)
+		}
 		log.Fatal(err)
+	}
+}
+
+func run(defaultAddress, listen, data string, noOpen, demo, tray bool) error {
+	canInstall := !demo && !noOpen && listen == "" && data == ""
+	var desktop *desktopHost
+	if !noOpen {
+		var err error
+		desktop, err = newDesktopHost(canInstall, tray)
+		if err != nil || desktop == nil {
+			return err
+		}
+		defer desktop.close()
+	}
+	listener, err := listenLocal(defaultAddress, listen)
+	if err != nil {
+		return err
 	}
 	defer listener.Close()
 	home, err := os.UserHomeDir()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	if *data == "" && !*demo {
+	if data == "" && !demo {
 		dir, err := os.UserConfigDir()
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
-		*data = filepath.Join(dir, "Knooo")
+		data = filepath.Join(dir, "Knooo")
 	}
-	a, err := studio.New(sessions.New(home), *data, *demo)
+	a, err := studio.New(sessions.New(home), data, demo)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer a.Close()
 	ui, err := fs.Sub(assets, "dist")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	addr := listener.Addr().String()
 	token := rand.Text()
 	url := "http://" + addr + "/#open=" + token
 	changelog, _ := assets.ReadFile("CHANGELOG.md")
 	stop := make(chan struct{})
-	updates := update.Handler(version, !*demo, canInstall, func() { close(stop) })
+	shutdown := sync.OnceFunc(func() { close(stop) })
+	updates := update.Handler(version, !demo, canInstall, shutdown)
 	server := &http.Server{
 		Handler:           a.Handler(addr, token, http.FileServer(http.FS(ui)), version, string(changelog), updates),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	fmt.Println(url)
-	if !*noOpen {
-		go func() {
-			if err := openDesktop(url); err != nil {
-				log.Print(err)
-			}
-		}()
-	}
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
+	var desktopDone chan error
+	if desktop != nil {
+		desktopDone = make(chan error, 1)
+		go func() { desktopDone <- desktop.run(url, data, stop) }()
+	}
+
 	select {
-	case err := <-served:
-		if !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
+	case err = <-served:
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
 		}
+	case err = <-desktopDone:
+		desktopDone = nil
 	case <-stop:
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := server.Shutdown(ctx); err != nil {
-			log.Printf("关闭 Knooo 服务：%v", err)
-			_ = server.Close()
+	}
+	shutdown()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("关闭 Knooo 服务：%v", err)
+		_ = server.Close()
+	}
+	if desktopDone != nil {
+		if desktopErr := <-desktopDone; err == nil {
+			err = desktopErr
 		}
 	}
+	return err
 }
 
 func listenLocal(defaultAddress, override string) (net.Listener, error) {
