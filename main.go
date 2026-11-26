@@ -49,6 +49,9 @@ func main() {
 	data := flag.String("data", "", "Application data directory")
 	tray := flag.Bool("tray", false, "Start in the Windows notification area")
 	flag.Parse()
+	if *noOpen {
+		attachHeadlessConsole()
+	}
 	if err := run(defaultAddress, *listen, *data, *noOpen, *demo, *tray); err != nil {
 		if !*noOpen {
 			showDesktopError(err)

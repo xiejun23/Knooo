@@ -23,6 +23,8 @@ func (*desktopHost) close() {}
 
 func showDesktopError(error) {}
 
+func attachHeadlessConsole() {}
+
 func (*desktopHost) run(url, _ string, stop <-chan struct{}) error {
 	go func() {
 		if err := openDesktop(url); err != nil {

@@ -143,6 +143,29 @@ func (h *desktopHost) close() {
 	}
 }
 
+func attachHeadlessConsole() {
+	_, stdoutErr := windows.GetFileType(windows.Handle(os.Stdout.Fd()))
+	_, stderrErr := windows.GetFileType(windows.Handle(os.Stderr.Fd()))
+	if stdoutErr == nil && stderrErr == nil {
+		return
+	}
+	// GUI builds have no console by default, including when started from a terminal.
+	attach := windows.NewLazySystemDLL("kernel32.dll").NewProc("AttachConsole")
+	const attachParentConsole = 0xffffffff
+	attach.Call(attachParentConsole)
+	if stdoutErr != nil {
+		if handle, err := windows.GetStdHandle(windows.STD_OUTPUT_HANDLE); err == nil && handle != 0 && handle != windows.InvalidHandle {
+			os.Stdout = os.NewFile(uintptr(handle), "stdout")
+		}
+	}
+	if stderrErr != nil {
+		if handle, err := windows.GetStdHandle(windows.STD_ERROR_HANDLE); err == nil && handle != 0 && handle != windows.InvalidHandle {
+			os.Stderr = os.NewFile(uintptr(handle), "stderr")
+			log.SetOutput(os.Stderr)
+		}
+	}
+}
+
 func showDesktopError(err error) {
 	message := windows.StringToUTF16Ptr(err.Error())
 	title := windows.StringToUTF16Ptr("Knooo")
