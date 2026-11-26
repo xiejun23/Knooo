@@ -18,6 +18,9 @@ const reviewInstructions = `把这段 Agent 会话提炼成中文工作回顾。
 每项必须引用用户消息；有做法或结果时也必须引用对应 assistant 消息。status 只能为 verified、resolved、open 或 observed，无法确认完成时用 open 或 observed。没有实质问题时返回空数组。
 续接已有问题时必须原样沿用已有列表中的 title，引用本批新证据；无新进展的问题不要重复输出。`
 
+// Leave room for the fixed correction prompt and the code-generated validation reason.
+const reviewCorrectionHeadroom = 160
+
 var ErrReviewResponse = errors.New("模型未返回有效的工作回顾")
 
 type InvalidReviewResponse struct {
@@ -144,6 +147,7 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 		sizes = append(sizes, len(raw)+1)
 	}
 	maxBatchMessages := len(reduced)
+	corrected := false
 	for start < len(reduced) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -166,10 +170,14 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 		if start < len(offsets) {
 			boundary = offsets[start]
 		}
+		batchLimit := limit
+		if consumed == 0 && !corrected {
+			batchLimit -= reviewCorrectionHeadroom
+		}
 		// A carried question and its context must leave room for a new message.
-		contextBudget := limit - used - sizes[start]
-		previous, candidates := reviewContinuation(result, contextUser, carry >= 0, min(limit/4, 2400, contextBudget))
-		overlap := reviewBoundaryContext(messages, boundary, carriedID, min(limit/5, 900, contextBudget-len(previous)))
+		contextBudget := batchLimit - used - sizes[start]
+		previous, candidates := reviewContinuation(result, contextUser, carry >= 0, min(batchLimit/4, 2400, contextBudget))
+		overlap := reviewBoundaryContext(messages, boundary, carriedID, min(batchLimit/5, 900, contextBudget-len(previous)))
 		prompt := reviewInstructions + overlap + previous
 		used += len(overlap) + len(previous)
 		for end < len(reduced) && end-start < maxBatchMessages {
@@ -180,7 +188,7 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 				nextTurn = end
 				questions++
 			}
-			if used+sizes[end] > limit {
+			if used+sizes[end] > batchLimit {
 				if nextTurn > start {
 					end = nextTurn
 				}
@@ -203,6 +211,19 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 			return err
 		}
 		response, err := requestText(ctx, batchConfig, prompt, plan.transcript, plan.OutputBudget, nil)
+		var batchTopics []Topic
+		var invalid error
+		if err == nil {
+			batchTopics, invalid = parseReviewTopics(response, plan.refs, original)
+			if invalid != nil && consumed == 0 && !corrected {
+				corrected = true
+				correction := prompt + "\n上次校验失败：" + invalid.Error() + "。请重新生成完整 JSON。"
+				response, err = requestText(ctx, batchConfig, correction, plan.transcript, plan.OutputBudget, nil)
+				if err == nil {
+					batchTopics, invalid = parseReviewTopics(response, plan.refs, original)
+				}
+			}
+		}
 		if errors.Is(err, errOutputLimit) {
 			if end-start == 1 {
 				return fmt.Errorf("模型回复达到输出上限（已缩至单条新增消息，请求上限 %d token），请检查提炼输出上限与推理强度，或换用其他模型", plan.TotalOutputBudget)
@@ -219,15 +240,10 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 		if err != nil {
 			return err
 		}
-		topics, err := parseTopics(response, plan.refs)
-		if err != nil {
-			return &InvalidReviewResponse{Consumed: consumed, Cause: err}
+		if invalid != nil {
+			return &InvalidReviewResponse{Consumed: consumed, Cause: invalid}
 		}
-		for index, topic := range topics {
-			topic.Lesson, topic.Exercise = "", ""
-			if err := validateReviewTopic(topic, original); err != nil {
-				return &InvalidReviewResponse{Consumed: consumed, Cause: fmt.Errorf("第 %d 个问题：%w", index+1, err)}
-			}
+		for _, topic := range batchTopics {
 			if carriedID != "" && len(topic.Evidence) == 1 && topic.Evidence[0] == carriedID {
 				continue
 			}
@@ -253,6 +269,21 @@ func Review(ctx context.Context, config Config, model Model, messages []Input, c
 		start = end
 	}
 	return nil
+}
+
+func parseReviewTopics(response string, refs map[string]int, messages []Input) ([]Topic, error) {
+	topics, err := parseTopics(response, refs)
+	if err != nil {
+		return nil, err
+	}
+	for index := range topics {
+		topic := &topics[index]
+		topic.Lesson, topic.Exercise = "", ""
+		if err := validateReviewTopic(*topic, messages); err != nil {
+			return nil, fmt.Errorf("第 %d 个问题：%w", index+1, err)
+		}
+	}
+	return topics, nil
 }
 
 func clipRunes(text string, limit int) string {

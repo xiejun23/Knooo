@@ -481,6 +481,76 @@ func TestReviewKeepsNewMessagesWhenResumingWithSmallBudget(t *testing.T) {
 	}
 }
 
+func TestReviewCorrectsInvalidFirstBatchOnce(t *testing.T) {
+	messages := []Input{
+		{ID: "u1", Role: "user", Text: strings.Repeat("请核对索引的覆盖范围。", 4)},
+		{ID: "a1", Role: "assistant", Text: strings.Repeat("确认查询走预期索引。", 4)},
+		{ID: "a2", Role: "assistant", Text: strings.Repeat("补充了查询回归测试。", 4)},
+	}
+	const corrected = `{"topics":[{"title":"索引检查","problem":"核对索引覆盖字段","status":"open","evidence":["u1"]}]}`
+	const discarded = "discarded raw provider output"
+	for _, test := range []struct{ name, firstReply, reason string }{
+		{
+			name:       "missing user evidence after a valid topic",
+			firstReply: `{"topics":[{"title":"` + discarded + `","problem":"核对索引","status":"open","evidence":["u1"]},{"title":"回归测试","problem":"补充回归测试","status":"open","evidence":["a2"]}]}`,
+			reason:     "第 2 个问题：缺少用户消息依据",
+		},
+		{
+			name:       "invalid JSON",
+			firstReply: discarded,
+			reason:     "回复正文不符合工作回顾 JSON 格式，应包含 topics 数组",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := make(chan struct{}, 2)
+			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct{ Messages []struct{ Content string } }
+				var batch []Input
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Messages) != 2 ||
+					json.Unmarshal([]byte(body.Messages[1].Content), &batch) != nil {
+					t.Error("invalid review request")
+					http.Error(w, "invalid batch", http.StatusBadRequest)
+					return
+				}
+				select {
+				case requests <- struct{}{}:
+				default:
+					t.Error("unexpected third request")
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+					return
+				}
+				prompt, transcript := body.Messages[0].Content, body.Messages[1].Content
+				if !slices.Equal(batch, messages) || len(prompt)+len(transcript)+128 > MinInputBudget {
+					t.Errorf("request %d should preserve the whole batch within budget", len(requests))
+				}
+				reply := test.firstReply
+				if len(requests) == 2 {
+					if !strings.Contains(prompt, test.reason) || strings.Contains(prompt+transcript, discarded) {
+						t.Errorf("correction should include the exact validation reason without model output: %q", prompt)
+					}
+					reply = corrected
+				}
+				io.WriteString(w, `{"choices":[{"finish_reason":"stop","message":{"content":`+jsonString(reply)+`}}]}`)
+			}))
+			defer gateway.Close()
+			config := Config{Provider: "gateway", Model: "review-test", BaseURL: gateway.URL, InputBudget: MinInputBudget}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var checkpoints []int
+			err := Review(ctx, config, Model{}, messages, 0, nil, func(consumed int, topics []Topic) error {
+				checkpoints = append(checkpoints, consumed)
+				if len(topics) != 1 || topics[0].Title != "索引检查" || !slices.Equal(topics[0].Evidence, []string{"u1"}) {
+					t.Fatalf("checkpoint should contain only the corrected topic: %+v", topics)
+				}
+				return nil
+			})
+			if err != nil || len(requests) != 2 || !slices.Equal(checkpoints, []int{len(messages)}) {
+				t.Fatalf("requests=%d, checkpoints=%v, err=%v", len(requests), checkpoints, err)
+			}
+		})
+	}
+}
+
 func TestReviewHonorsOutputBudgetAndSplitsTruncatedBatch(t *testing.T) {
 	messages := []Input{
 		{ID: "u1", Role: "user", Text: "请检查缓存。"},

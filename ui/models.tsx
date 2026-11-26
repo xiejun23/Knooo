@@ -291,7 +291,7 @@ export function AutomaticReviewSettings({
   <div className="auto-review-head">
    <div>
     <h2>自动工作回顾</h2>
-    <p>启用后，每条会话静默 2 小时才自动提炼。工作回顾页可查看倒计时，也可立即提炼。已保存且有效的回顾会复用，只处理新增消息。</p>
+    <p>启用后，每条会话静默 2 小时才自动提炼。工作回顾页可查看倒计时，也可立即提炼。已保存且有效的回顾会复用，只处理新增消息。{selected && maxAgeDays === 1 && '「今天」也包含静默期在今天才结束的昨晚会话。'}</p>
    </div>
    <span className="provider-status" data-status={activeRunning ? 'ready' : 'disabled'}>
     <span className="provider-status-dot" aria-hidden="true"/>

@@ -25,6 +25,7 @@ func TestPlatformLogsPersistReviewRejection(t *testing.T) {
 	}
 	gateway, _ := reviewTestGateway(t, []reviewTestBatch{
 		{ids: []string{"old-user", "old-answer"}, topics: []distill.Topic{topic}},
+		{ids: []string{"old-user", "old-answer"}, topics: []distill.Topic{topic}},
 	})
 	data := t.TempDir()
 	a := openReviewTestApp(t, data, item)

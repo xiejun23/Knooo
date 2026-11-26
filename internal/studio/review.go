@@ -929,9 +929,12 @@ func reviewOutsideWindow(item sessions.Session, maxAgeDays int, now time.Time) b
 		return maxAgeDays == reviewWindowToday
 	}
 	if maxAgeDays == reviewWindowToday {
-		year, month, day := now.Date()
-		activityYear, activityMonth, activityDay := latest.In(now.Location()).Date()
-		return activityYear != year || activityMonth != month || activityDay != day
+		today := now.Format(time.DateOnly)
+		activityDay := latest.In(now.Location()).Format(time.DateOnly)
+		if activityDay == today {
+			return false
+		}
+		return activityDay > today || latest.Add(reviewIdleDelay).In(now.Location()).Format(time.DateOnly) != today
 	}
 	return latest.Before(now.AddDate(0, 0, -maxAgeDays))
 }

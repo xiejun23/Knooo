@@ -354,13 +354,16 @@ func TestAutomaticReviewIdleCooldownAndPersistedFailure(t *testing.T) {
 			{ID: "b1", Role: "user", Text: "检查构建脚本的缓存参数。", Timestamp: idle},
 		},
 	}
-	failGateway, failCalls := reviewTestGateway(t, []reviewTestBatch{{ids: []string{"b1"}}})
+	failGateway, failCalls := reviewTestGateway(t, []reviewTestBatch{
+		{ids: []string{"b1"}},
+		{ids: []string{"b1"}},
+	})
 	failDir := t.TempDir()
 	fa := openReviewTestApp(t, failDir, badItem)
 	profile := configureReviewTest(t, fa, failGateway)
 	fa.processReviews(context.Background(), false)
-	if failCalls.Load() != 1 {
-		t.Fatalf("expected 1 failed attempt on initial batch, got %d", failCalls.Load())
+	if failCalls.Load() != 2 {
+		t.Fatalf("expected the initial request and one correction, got %d calls", failCalls.Load())
 	}
 	setReviewTestModel(t, fa, "")
 	if err := fa.Close(); err != nil {
@@ -369,7 +372,7 @@ func TestAutomaticReviewIdleCooldownAndPersistedFailure(t *testing.T) {
 	reopened := openReviewTestApp(t, failDir, badItem)
 	setReviewTestModel(t, reopened, profile.ID)
 	reopened.processReviews(context.Background(), false)
-	if failCalls.Load() != 1 {
+	if failCalls.Load() != 2 {
 		t.Fatalf("persisted failure should prevent re-calling model after restart, got %d calls", failCalls.Load())
 	}
 }
@@ -452,24 +455,39 @@ func TestAutomaticReviewShortWindowDateBoundaries(t *testing.T) {
 	zone := time.FixedZone("UTC+8", 8*60*60)
 	now := time.Date(2026, time.November, 26, 11, 0, 0, 0, zone)
 	midnight := time.Date(2026, time.November, 26, 0, 0, 0, 0, zone)
+	lateYesterday := midnight.Add(-time.Hour)
+	cooldownEnds := midnight.Add(time.Hour)
 	threeDaysAgo := now.AddDate(0, 0, -3)
 	for _, tt := range []struct {
 		name    string
 		days    int
+		at      time.Time
 		updated time.Time
 		outside bool
+		cooling bool
 	}{
-		{"today starts at local midnight", 1, midnight, false},
-		{"yesterday is outside today even within 24 hours", 1, midnight.Add(-time.Nanosecond), true},
-		{"tomorrow is outside today", 1, midnight.AddDate(0, 0, 1), true},
-		{"missing activity cannot be classified as today", 1, time.Time{}, true},
-		{"three days includes the boundary", 3, threeDaysAgo, false},
-		{"three days excludes older activity", 3, threeDaysAgo.Add(-time.Nanosecond), true},
+		{"today starts at local midnight", 1, now, midnight, false, false},
+		{"late session waits before local midnight", 1, midnight.Add(-time.Minute), lateYesterday, false, true},
+		{"late session still waits at 00:59", 1, cooldownEnds.Add(-time.Minute), lateYesterday, false, true},
+		{"late session becomes eligible at 01:00", 1, cooldownEnds, lateYesterday, false, false},
+		{"late session can retry later that day", 1, now, lateYesterday, false, false},
+		{"cooldown ending exactly at midnight carries over", 1, midnight, midnight.Add(-2 * time.Hour), false, false},
+		{"older activity within 24 hours is still outside today", 1, now, midnight.Add(-2*time.Hour - time.Nanosecond), true, false},
+		{"late session expires the day after it could run", 1, midnight.AddDate(0, 0, 1), lateYesterday, true, false},
+		{"tomorrow is outside today", 1, now, midnight.AddDate(0, 0, 1), true, false},
+		{"missing activity cannot be classified as today", 1, now, time.Time{}, true, false},
+		{"three days includes the boundary", 3, now, threeDaysAgo, false, false},
+		{"three days excludes older activity", 3, now, threeDaysAgo.Add(-time.Nanosecond), true, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			item := sessions.Session{Updated: tt.updated.UTC().Format(time.RFC3339Nano)}
-			if got := reviewOutsideWindow(item, tt.days, now); got != tt.outside {
-				t.Errorf("outside window = %t, want %t", got, tt.outside)
+			var item sessions.Session
+			if !tt.updated.IsZero() {
+				item.Updated = tt.updated.UTC().Format(time.RFC3339Nano)
+			}
+			outside := reviewOutsideWindow(item, tt.days, tt.at)
+			cooling := !reviewCooldownUntil(item, tt.at).IsZero()
+			if outside != tt.outside || cooling != tt.cooling {
+				t.Errorf("outside window = %t, cooling = %t; want outside = %t, cooling = %t", outside, cooling, tt.outside, tt.cooling)
 			}
 		})
 	}
