@@ -12,7 +12,6 @@ import (
 	"unsafe"
 
 	"github.com/wailsapp/go-webview2/pkg/combridge"
-	"github.com/wailsapp/go-webview2/pkg/webview2"
 	"github.com/wailsapp/go-webview2/webviewloader"
 	"golang.org/x/sys/windows"
 )
@@ -26,36 +25,36 @@ var (
 
 type controllerCompleted interface {
 	combridge.IUnknown
-	controllerCompleted(int32, *webview2.ICoreWebView2Controller)
+	controllerCompleted(int32, *webViewObject)
 }
 
 type navigationStarting interface {
 	combridge.IUnknown
-	navigationStarting(*webview2.ICoreWebView2NavigationStartingEventArgs) uintptr
+	navigationStarting(*webViewObject) uintptr
 }
 
 type newWindowRequested interface {
 	combridge.IUnknown
-	newWindowRequested(*webview2.ICoreWebView2NewWindowRequestedEventArgs) uintptr
+	newWindowRequested(*webViewObject) uintptr
 }
 
 func init() {
 	combridge.RegisterVTable[combridge.IUnknown, controllerCompleted](
 		"{6C4819F3-C9B7-4260-8127-C9F5BDE7F68C}",
-		func(this uintptr, status int32, controller *webview2.ICoreWebView2Controller) uintptr {
+		func(this uintptr, status int32, controller *webViewObject) uintptr {
 			combridge.Resolve[controllerCompleted](this).controllerCompleted(status, controller)
 			return 0
 		},
 	)
 	combridge.RegisterVTable[combridge.IUnknown, navigationStarting](
 		"{9ADBE429-F36D-432B-9DDC-F8881FBD76E3}",
-		func(this uintptr, _ *webview2.ICoreWebView2, args *webview2.ICoreWebView2NavigationStartingEventArgs) uintptr {
+		func(this uintptr, _ *webViewObject, args *webViewObject) uintptr {
 			return combridge.Resolve[navigationStarting](this).navigationStarting(args)
 		},
 	)
 	combridge.RegisterVTable[combridge.IUnknown, newWindowRequested](
 		"{D4C185FE-C81C-4989-97AF-2D3FA7AB5651}",
-		func(this uintptr, _ *webview2.ICoreWebView2, args *webview2.ICoreWebView2NewWindowRequestedEventArgs) uintptr {
+		func(this uintptr, _ *webViewObject, args *webViewObject) uintptr {
 			return combridge.Resolve[newWindowRequested](this).newWindowRequested(args)
 		},
 	)
@@ -77,8 +76,8 @@ func (w *desktopWindow) runWebView(data string) error {
 	defer killTimer.Call(w.hwnd, webViewStartupTimer)
 	defer func() {
 		if w.controller != nil {
-			_ = w.controller.Close()
-			w.controller.Vtbl.CallRelease(unsafe.Pointer(w.controller))
+			w.controller.call(controllerClose)
+			w.controller.call(comRelease)
 			w.controller = nil
 		}
 	}()
@@ -111,23 +110,22 @@ func (w *desktopWindow) EnvironmentCompleted(status webviewloader.HRESULT, objec
 		w.failWebView(fmt.Errorf("初始化 WebView2 Runtime：HRESULT 0x%08x", uint32(status)))
 		return 0
 	}
-	environment := (*webview2.ICoreWebView2Environment)(unsafe.Pointer(object))
+	environment := (*webViewObject)(unsafe.Pointer(object))
 	completed := combridge.New[controllerCompleted](w)
 	defer completed.Close()
-	// The generated binding passes the HWND by address, but this COM method takes it by value.
-	result, _, _ := environment.Vtbl.CreateCoreWebView2Controller.Call(uintptr(unsafe.Pointer(environment)), w.hwnd, completed.Ref())
+	result := environment.call(environmentCreateController, w.hwnd, completed.Ref())
 	if err := webViewResult(result); err != nil {
 		w.failWebView(fmt.Errorf("创建 WebView2 窗口：%w", err))
 	}
 	return 0
 }
 
-func (w *desktopWindow) controllerCompleted(status int32, controller *webview2.ICoreWebView2Controller) {
+func (w *desktopWindow) controllerCompleted(status int32, controller *webViewObject) {
 	if status < 0 || controller == nil {
 		w.failWebView(fmt.Errorf("创建 WebView2 窗口：HRESULT 0x%08x", uint32(status)))
 		return
 	}
-	controller.AddRef()
+	controller.call(comAddRef)
 	w.controller = controller
 	w.resize()
 	if err := w.configureWebView(); err != nil {
@@ -138,25 +136,19 @@ func (w *desktopWindow) controllerCompleted(status int32, controller *webview2.I
 }
 
 func (w *desktopWindow) configureWebView() error {
-	view, err := w.controller.GetCoreWebView2()
-	if err != nil {
-		return err
+	var view *webViewObject
+	if result := w.controller.call(controllerGetWebView, uintptr(unsafe.Pointer(&view))); int32(result) < 0 {
+		return webViewResult(result)
 	}
-	defer view.Vtbl.CallRelease(unsafe.Pointer(view))
-	settings, err := view.GetSettings()
-	if err != nil {
-		return err
+	defer view.call(comRelease)
+
+	var settings *webViewObject
+	if result := view.call(viewGetSettings, uintptr(unsafe.Pointer(&settings))); int32(result) < 0 {
+		return webViewResult(result)
 	}
-	defer settings.Vtbl.CallRelease(unsafe.Pointer(settings))
-	// The COM ABI takes BOOL by value. Some generated setters pass a pointer.
-	for _, setter := range []webview2.ComProc{
-		settings.Vtbl.PutIsWebMessageEnabled,
-		settings.Vtbl.PutAreHostObjectsAllowed,
-		settings.Vtbl.PutAreDevToolsEnabled,
-		settings.Vtbl.PutAreDefaultContextMenusEnabled,
-	} {
-		result, _, _ := setter.Call(uintptr(unsafe.Pointer(settings)), 0)
-		if err := webViewResult(result); err != nil {
+	defer settings.call(comRelease)
+	for _, setter := range []int{settingsSetWebMessage, settingsSetHostObjects, settingsSetDevTools, settingsSetContextMenu} {
+		if err := webViewResult(settings.call(setter, 0)); err != nil {
 			return err
 		}
 	}
@@ -167,15 +159,15 @@ func (w *desktopWindow) configureWebView() error {
 	defer popup.Close()
 	// The controller owns the handlers until Close releases its event subscriptions.
 	for _, event := range []struct {
-		register webview2.ComProc
-		handler  uintptr
+		slot    int
+		handler uintptr
 	}{
-		{view.Vtbl.AddNavigationStarting, navigation.Ref()},
-		{view.Vtbl.AddFrameNavigationStarting, navigation.Ref()},
-		{view.Vtbl.AddNewWindowRequested, popup.Ref()},
+		{viewAddNavigation, navigation.Ref()},
+		{viewAddFrameNavigation, navigation.Ref()},
+		{viewAddNewWindow, popup.Ref()},
 	} {
-		var token webview2.EventRegistrationToken
-		result, _, _ := event.register.Call(uintptr(unsafe.Pointer(view)), event.handler, uintptr(unsafe.Pointer(&token)))
+		var token int64
+		result := view.call(event.slot, event.handler, uintptr(unsafe.Pointer(&token)))
 		if err := webViewResult(result); err != nil {
 			return err
 		}
@@ -185,30 +177,26 @@ func (w *desktopWindow) configureWebView() error {
 	if err != nil {
 		return err
 	}
-	// Navigate takes LPCWSTR, not an address of a pointer.
-	result, _, _ := view.Vtbl.Navigate.Call(uintptr(unsafe.Pointer(view)), uintptr(unsafe.Pointer(target)))
-	return webViewResult(result)
+	return webViewResult(view.call(viewNavigate, uintptr(unsafe.Pointer(target))))
 }
 
-func (w *desktopWindow) navigationStarting(args *webview2.ICoreWebView2NavigationStartingEventArgs) uintptr {
-	uri := webViewURI(args.Vtbl.GetUri, unsafe.Pointer(args))
-	user, _ := args.GetIsUserInitiated()
+func (w *desktopWindow) navigationStarting(args *webViewObject) uintptr {
+	uri := args.uri()
+	user := args.userInitiated(navigationGetUserInitiated)
 	if localWebViewURI(w.origin, uri) || user && webViewMailto(uri) {
 		return 0
 	}
-	result, _, _ := args.Vtbl.PutCancel.Call(uintptr(unsafe.Pointer(args)), 1)
+	result := args.call(navigationSetCancel, 1)
 	if int32(result) >= 0 && user {
 		w.openExternal(uri)
 	}
 	return result
 }
 
-func (w *desktopWindow) newWindowRequested(args *webview2.ICoreWebView2NewWindowRequestedEventArgs) uintptr {
-	result, _, _ := args.Vtbl.PutHandled.Call(uintptr(unsafe.Pointer(args)), 1)
-	if int32(result) >= 0 {
-		if user, _ := args.GetIsUserInitiated(); user {
-			w.openExternal(webViewURI(args.Vtbl.GetUri, unsafe.Pointer(args)))
-		}
+func (w *desktopWindow) newWindowRequested(args *webViewObject) uintptr {
+	result := args.call(newWindowSetHandled, 1)
+	if int32(result) >= 0 && args.userInitiated(newWindowGetUserInitiated) {
+		w.openExternal(args.uri())
 	}
 	return result
 }
@@ -251,14 +239,60 @@ func openInDefaultBrowser(uri string) error {
 	return windows.ShellExecute(0, nil, target, nil, nil, windows.SW_SHOWNORMAL)
 }
 
-func webViewURI(getURI webview2.ComProc, object unsafe.Pointer) string {
+// WebView2 vtable slots from the Win32 SDK's webview2.idl. Importing the
+// generated bindings initializes unused Go callbacks with unsupported parameter sizes.
+const (
+	comAddRef  = 1
+	comRelease = 2
+
+	environmentCreateController = 3
+
+	controllerSetBounds   = 6
+	controllerParentMoved = 23
+	controllerClose       = 24
+	controllerGetWebView  = 25
+
+	viewGetSettings        = 3
+	viewNavigate           = 5
+	viewAddNavigation      = 7
+	viewAddFrameNavigation = 17
+	viewAddNewWindow       = 44
+
+	settingsSetWebMessage  = 6
+	settingsSetDevTools    = 12
+	settingsSetContextMenu = 14
+	settingsSetHostObjects = 16
+
+	eventGetURI                = 3
+	navigationGetUserInitiated = 4
+	navigationSetCancel        = 8
+	newWindowSetHandled        = 6
+	newWindowGetUserInitiated  = 8
+)
+
+type webViewObject struct {
+	vtable *[viewAddNewWindow + 1]uintptr
+}
+
+//go:uintptrescapes
+func (o *webViewObject) call(slot int, args ...uintptr) uintptr {
+	result, _, _ := syscall.SyscallN(o.vtable[slot], append([]uintptr{uintptr(unsafe.Pointer(o))}, args...)...)
+	return result
+}
+
+func (o *webViewObject) uri() string {
 	var uri *uint16
-	result, _, _ := getURI.Call(uintptr(object), uintptr(unsafe.Pointer(&uri)))
-	if int32(result) < 0 || uri == nil {
+	if result := o.call(eventGetURI, uintptr(unsafe.Pointer(&uri))); int32(result) < 0 || uri == nil {
 		return ""
 	}
 	defer windows.CoTaskMemFree(unsafe.Pointer(uri))
 	return windows.UTF16PtrToString(uri)
+}
+
+func (o *webViewObject) userInitiated(slot int) bool {
+	var user int32
+	result := o.call(slot, uintptr(unsafe.Pointer(&user)))
+	return int32(result) >= 0 && user != 0
 }
 
 func webViewResult(result uintptr) error {

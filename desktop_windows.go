@@ -10,7 +10,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/wailsapp/go-webview2/pkg/webview2"
 	"golang.org/x/sys/windows"
 )
 
@@ -185,12 +184,16 @@ type windowClass struct {
 	className   *uint16
 }
 
+type windowPoint struct {
+	x, y int32
+}
+
 type windowMessage struct {
 	window         uintptr
 	message        uint32
 	wParam, lParam uintptr
 	time           uint32
-	point          webview2.POINT
+	point          windowPoint
 	private        uint32
 }
 
@@ -217,7 +220,7 @@ type desktopWindow struct {
 	tray           trayIconData
 	trayPresent    bool
 	visible        bool
-	controller     *webview2.ICoreWebView2Controller
+	controller     *webViewObject
 	webViewError   error
 	origin         string
 	url            string
@@ -260,7 +263,7 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 	if atom, _, err := registerClass.Call(uintptr(unsafe.Pointer(&class))); atom == 0 {
 		return fmt.Errorf("注册 Knooo 窗口：%w", err)
 	}
-	var workArea webview2.RECT
+	var workArea windows.Rect
 	systemParameters.Call(0x0030, 0, uintptr(unsafe.Pointer(&workArea)), 0)
 	width, height := int32(1240), int32(800)
 	if workArea.Right > workArea.Left {
@@ -302,7 +305,7 @@ func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uin
 		w.resize()
 	case wmMove:
 		if w.controller != nil {
-			_ = w.controller.NotifyParentWindowPositionChanged()
+			w.controller.call(controllerParentMoved)
 		}
 	case wmQueryEndSession:
 		return 1
@@ -355,9 +358,9 @@ func (w *desktopWindow) resize() {
 	if w.controller == nil {
 		return
 	}
-	var bounds webview2.RECT
+	var bounds windows.Rect
 	if ok, _, _ := getClientRect.Call(w.hwnd, uintptr(unsafe.Pointer(&bounds))); ok != 0 {
-		if err := w.controller.PutBounds(bounds); err != nil {
+		if err := webViewResult(w.controller.call(controllerSetBounds, uintptr(unsafe.Pointer(&bounds)))); err != nil {
 			log.Printf("调整 Knooo 窗口大小：%v", err)
 		}
 	}
@@ -392,10 +395,10 @@ func (w *desktopWindow) showTrayMenu() {
 	appendMenu.Call(menu, 0, trayOpen, uintptr(unsafe.Pointer(open)))
 	appendMenu.Call(menu, 0, trayQuit, uintptr(unsafe.Pointer(quit)))
 	setMenuDefault.Call(menu, trayOpen, 0)
-	var point webview2.POINT
+	var point windowPoint
 	getCursorPos.Call(uintptr(unsafe.Pointer(&point)))
 	setForeground.Call(w.hwnd)
-	command, _, _ := trackPopupMenu.Call(menu, 0x182, uintptr(point.X), uintptr(point.Y), 0, w.hwnd, 0)
+	command, _, _ := trackPopupMenu.Call(menu, 0x182, uintptr(point.x), uintptr(point.y), 0, w.hwnd, 0)
 	postMessage.Call(w.hwnd, 0, 0, 0)
 	switch command {
 	case trayOpen:
