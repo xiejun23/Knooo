@@ -106,12 +106,12 @@ func SynthesizeReport(ctx context.Context, config Config, model Model, focus str
 }
 
 func parseReportSynthesis(text string, included map[int]ReportFact, maxItems int) (ReportSynthesis, error) {
-	text = strings.TrimSpace(text)
-	if first, rest, ok := strings.Cut(text, "\n"); ok && (strings.TrimSpace(first) == "```json" || strings.TrimSpace(first) == "```") {
-		text, _ = strings.CutSuffix(rest, "\n```")
+	extracted, err := extractJSONObject(text)
+	if err != nil {
+		return ReportSynthesis{}, errReportResponse
 	}
 	var response ReportSynthesis
-	if json.Unmarshal([]byte(text), &response) != nil {
+	if json.Unmarshal([]byte(extracted), &response) != nil {
 		return ReportSynthesis{}, errReportResponse
 	}
 	plain := func(text string) string { return strings.Join(strings.Fields(text), " ") }

@@ -64,4 +64,9 @@ func TestReportSynthesisValidatesAssociationAndKeepsAcceptedRows(t *testing.T) {
 			t.Fatalf("unexpected result for sources %s: %+v (%v)", sources, result, err)
 		}
 	}
+	wrapped := "以下是汇总报告：\n```JSON\n" + `{"items":[{"type":"testing","title":"回归检查","text":"已完成。","sources":[1]}]}` + "\n```\n供参考。"
+	result, err := parseReportSynthesis(wrapped, facts, 2)
+	if err != nil || len(result.Items) != 1 || result.Items[0].Title != "回归检查" {
+		t.Fatalf("wrapped report parse failed: %+v (%v)", result, err)
+	}
 }

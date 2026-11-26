@@ -71,15 +71,9 @@ func (p Plan) generate(ctx context.Context, config Config, transport http.RoundT
 }
 
 func parseTopics(text string, refs map[string]int) ([]Topic, error) {
-	text = strings.TrimSpace(text)
-	if opening, body, ok := strings.Cut(text, "\n"); ok {
-		opening = strings.TrimSpace(opening)
-		if opening == "```json" || opening == "```" {
-			text, ok = strings.CutSuffix(body, "\n```")
-			if !ok {
-				return nil, errors.New("回复正文的工作回顾 JSON 代码块未闭合")
-			}
-		}
+	text, err := extractJSONObject(text)
+	if err != nil {
+		return nil, err
 	}
 
 	var result struct {
@@ -173,4 +167,118 @@ func excerptPrefix(text string, limit int) string {
 		limit--
 	}
 	return text
+}
+
+func extractJSONObject(text string) (string, error) {
+	text = strings.TrimSpace(text)
+	if len(text) >= len("<think>") && strings.EqualFold(text[:len("<think>")], "<think>") {
+		return text, nil
+	}
+	if opening, body, ok := strings.Cut(text, "\n"); ok {
+		tag := strings.ToLower(strings.TrimSpace(opening))
+		if tag == "```json" || tag == "```" {
+			end := findFenceClose(body)
+			if end < 0 {
+				return "", errors.New("回复正文的工作回顾 JSON 代码块未闭合")
+			}
+			return strings.TrimSpace(body[:end]), nil
+		}
+	}
+	if json.Valid([]byte(text)) {
+		return text, nil
+	}
+	if fenced, ok := extractFencedJSON(text); ok {
+		return fenced, nil
+	}
+	if obj, ok := extractSingleJSONObject(text); ok {
+		return obj, nil
+	}
+	return text, nil
+}
+
+func findFenceClose(body string) int {
+	offset := 0
+	for offset < len(body) {
+		end := strings.IndexByte(body[offset:], '\n')
+		var line string
+		if end < 0 {
+			line = body[offset:]
+		} else {
+			line = body[offset : offset+end]
+		}
+		if strings.TrimSpace(line) == "```" {
+			return offset
+		}
+		if end < 0 {
+			break
+		}
+		offset += end + 1
+	}
+	return -1
+}
+
+func extractFencedJSON(text string) (string, bool) {
+	offset := 0
+	for offset < len(text) {
+		end := strings.IndexByte(text[offset:], '\n')
+		if end < 0 {
+			break
+		}
+		tag := strings.ToLower(strings.TrimSpace(text[offset : offset+end]))
+		bodyStart := offset + end + 1
+		if tag == "```json" || tag == "```" {
+			if closeAt := findFenceClose(text[bodyStart:]); closeAt >= 0 {
+				candidate := strings.TrimSpace(text[bodyStart : bodyStart+closeAt])
+				if json.Valid([]byte(candidate)) {
+					return candidate, true
+				}
+			}
+		}
+		offset = bodyStart
+	}
+	return "", false
+}
+
+func extractSingleJSONObject(text string) (string, bool) {
+	start := strings.IndexByte(text, '{')
+	if start < 0 {
+		return "", false
+	}
+	depth, inString, escaped := 0, false, false
+	end := -1
+	for i := start; i < len(text); i++ {
+		ch := text[i]
+		if inString {
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				end = i + 1
+			}
+		}
+		if end > 0 {
+			break
+		}
+	}
+	if end < 0 || strings.ContainsRune(text[end:], '{') {
+		return "", false
+	}
+	candidate := text[start:end]
+	if !json.Valid([]byte(candidate)) {
+		return "", false
+	}
+	return candidate, true
 }

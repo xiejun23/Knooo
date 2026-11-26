@@ -343,13 +343,7 @@ func responseText(provider string, data []byte) (string, error) {
 		if (choice.FinishReason != "" && choice.FinishReason != "stop") || choice.Message.Refusal != "" {
 			return "", incomplete
 		}
-		content := choice.Message.Content
-		if thinking, ok := strings.CutPrefix(strings.TrimSpace(content), "<think>"); ok {
-			if _, answer, ok := strings.Cut(thinking, "</think>"); ok {
-				content = answer
-			}
-		}
-		text.WriteString(content)
+		text.WriteString(stripLeadingThink(choice.Message.Content))
 	case "responses", "gateway-responses":
 		if response.Status == "" {
 			return "", missingResponseField("status")
@@ -413,4 +407,20 @@ func responseText(provider string, data []byte) (string, error) {
 		return "", incomplete
 	}
 	return text.String(), nil
+}
+
+func stripLeadingThink(content string) string {
+	rest := content
+	for {
+		trimmed := strings.TrimSpace(rest)
+		if len(trimmed) < len("<think>") || !strings.EqualFold(trimmed[:len("<think>")], "<think>") {
+			return rest
+		}
+		lower := strings.ToLower(trimmed)
+		closeIdx := strings.Index(lower[len("<think>"):], "</think>")
+		if closeIdx < 0 {
+			return rest
+		}
+		rest = trimmed[len("<think>")+closeIdx+len("</think>"):]
+	}
 }

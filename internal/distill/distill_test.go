@@ -320,6 +320,27 @@ func TestParseTopics(t *testing.T) {
 	if _, err := parseTopics(strings.Replace(topicJSON, `["m1"]`, `["ghost-99"]`, 1), refs); err == nil {
 		t.Fatal("all-invalid evidence should still fail")
 	}
+	for _, wrapped := range []string{
+		"```JSON\n" + topicJSON + "\n```\n以上供参考。",
+		"以下是提炼结果：\n```json\n" + topicJSON + "\n```",
+		"好的，工作回顾如下：\n" + topicJSON + "\n整理完毕。",
+	} {
+		topics, err := parseTopics(wrapped, refs)
+		if err != nil || len(topics) != 1 || topics[0].Title != "Session topic" {
+			t.Fatalf("parseTopics(%q) = %+v, err = %v", wrapped, topics, err)
+		}
+	}
+}
+
+func TestStripLeadingThink(t *testing.T) {
+	got := stripLeadingThink("  <THINK>first</THINK>\n<think>second</think>\n" + topicJSON)
+	if strings.TrimSpace(got) != topicJSON {
+		t.Fatalf("got = %q", got)
+	}
+	unclosed := "<think>unterminated reasoning\n" + topicJSON
+	if got := stripLeadingThink(unclosed); got != unclosed {
+		t.Fatalf("unterminated <think> should remain intact, got %q", got)
+	}
 }
 
 func TestLocal(t *testing.T) {
