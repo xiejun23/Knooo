@@ -35,7 +35,8 @@ func TestSessionListDiscoversHistoryWithoutRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "rollout-sample.jsonl"), data, 0600); err != nil {
+	transcript := filepath.Join(dir, "rollout-sample.jsonl")
+	if err := os.WriteFile(transcript, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	a, err := New(sessions.New(home), "", false)
@@ -53,9 +54,17 @@ func TestSessionListDiscoversHistoryWithoutRefresh(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &list); err != nil || len(list.Sessions) != 1 || list.Sessions[0].Count != 2 {
 		t.Fatalf("first session list did not discover the transcript: %s", response.Body.String())
 	}
-	if item := list.Sessions[0]; item.ID != "codex:codex-fixture" || len(item.Messages) != 0 ||
-		item.Path != filepath.Join(dir, "rollout-sample.jsonl") || item.SourceRoot != dir || item.Platform == "" {
+	item := list.Sessions[0]
+	if item.ID != "codex:codex-fixture" || len(item.Messages) != 0 || item.Platform == "" {
 		t.Fatalf("unexpected session list item: %+v", item)
+	}
+	// Windows can report the same directory using its short or long name.
+	for _, paths := range [][2]string{{item.Path, transcript}, {item.SourceRoot, dir}} {
+		got, gotErr := os.Stat(paths[0])
+		want, wantErr := os.Stat(paths[1])
+		if gotErr != nil || wantErr != nil || !os.SameFile(got, want) {
+			t.Fatalf("session path %q does not identify %q (stat errors: %v, %v)", paths[0], paths[1], gotErr, wantErr)
+		}
 	}
 	if len(list.Coverage.Environments) != 1 || len(list.Coverage.Roots) == 0 {
 		t.Fatalf("missing scan coverage: %+v", list.Coverage)
