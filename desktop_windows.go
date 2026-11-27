@@ -224,6 +224,7 @@ type trayIconData struct {
 
 type desktopWindow struct {
 	hwnd           uintptr
+	titleBar       desktopTitleBar
 	taskbarCreated uint32
 	tray           trayIconData
 	trayPresent    bool
@@ -282,7 +283,7 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 		height = min(height, workArea.Bottom-workArea.Top)
 	}
 	hwnd, _, err := createWindow.Call(0, uintptr(unsafe.Pointer(class.className)), uintptr(unsafe.Pointer(title)),
-		0x00cf0000, 0x80000000, 0x80000000, uintptr(width), uintptr(height), 0, 0, uintptr(module), 0)
+		0x02cf0000, 0x80000000, 0x80000000, uintptr(width), uintptr(height), 0, 0, uintptr(module), 0)
 	if hwnd == 0 {
 		return fmt.Errorf("创建 Knooo 窗口：%w", err)
 	}
@@ -291,7 +292,7 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 	h.hwnd.Store(hwnd)
 	defer h.hwnd.Store(0)
 
-	// The sidebar draws the brand. Keep the window name available to Windows.
+	// Keep the window name available to Windows without drawing a second title.
 	const hidden = hideCaption | hideCaptionIcon
 	options := struct{ flags, mask uint32 }{flags: hidden, mask: hidden}
 	setWindowThemeAttribute.Call(hwnd, themeNonClient, uintptr(unsafe.Pointer(&options)), unsafe.Sizeof(options))
@@ -299,6 +300,10 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 	window.tray = trayIconData{id: 1, window: hwnd, flags: 0x7, message: wmTray, icon: icon, version: 4}
 	window.tray.size = uint32(unsafe.Sizeof(window.tray))
 	copy(window.tray.tip[:], windows.StringToUTF16("Knooo"))
+	window.initTitleBar(module)
+	if window.titleBar.pin != 0 {
+		defer bufferedPaintUnInit.Call()
+	}
 	window.addTrayIcon()
 	defer shellNotifyIcon.Call(notifyDelete, uintptr(unsafe.Pointer(&window.tray)))
 	if !h.startHidden || !window.trayPresent {
@@ -318,15 +323,59 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 }
 
 func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
+	if w.titleBar.pin != 0 {
+		if message == wmNCHitTest {
+			return w.titleHitTest(hwnd, wParam, lParam)
+		}
+		var result uintptr
+		if handled, _, _ := dwmDefWindowProc.Call(hwnd, uintptr(message), wParam, lParam, uintptr(unsafe.Pointer(&result))); handled != 0 {
+			return result
+		}
+		switch message {
+		case wmNCCalcSize:
+			// Win32 supplies a RECT as the first field for either wParam form.
+			rect := *(**windows.Rect)(unsafe.Pointer(&lParam))
+			top := rect.Top
+			defWindowProc.Call(hwnd, wmNCCalcSize, wParam, lParam)
+			rect.Top = top + w.titleClientTop()
+			return 0
+		case wmPaint:
+			w.paintTitleBar()
+			return 0
+		case wmDrawItem:
+			if wParam == pinButtonID {
+				w.paintTitlePin(*(**drawItemStruct)(unsafe.Pointer(&lParam)))
+				return 1
+			}
+		case wmCommand:
+			if wParam == pinButtonID && lParam == w.titleBar.pin {
+				w.toggleTitlePin()
+				return 0
+			}
+		case wmSystemCommand:
+			if wParam == systemCommandPin {
+				w.toggleTitlePin()
+				return 0
+			}
+		case wmActivate, wmDWMComposition:
+			if err := w.extendTitleBar(); err != nil {
+				log.Printf("扩展 Knooo 标题栏：%v", err)
+			}
+			w.resize()
+		}
+	}
 	switch message {
 	case wmDesktopTopmost:
 		if w.hwnd == hwnd {
-			return windowTopmost(hwnd, wParam)
+			return w.setTitlePin(wParam)
 		}
 		return 0
 	case wmSize:
 		w.resize()
 	case wmMove:
+		if w.titleBar.pin != 0 {
+			w.resize()
+		}
 		if w.controller != nil {
 			w.controller.call(controllerParentMoved)
 		}
@@ -379,11 +428,13 @@ func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uin
 }
 
 func (w *desktopWindow) resize() {
-	if w.controller == nil {
-		return
-	}
 	var bounds windows.Rect
 	if ok, _, _ := getClientRect.Call(w.hwnd, uintptr(unsafe.Pointer(&bounds))); ok != 0 {
+		w.layoutTitleBar(bounds)
+		if w.controller == nil {
+			return
+		}
+		bounds.Top = min(bounds.Bottom, w.titleBar.height)
 		if err := webViewResult(w.controller.call(controllerSetBounds, uintptr(unsafe.Pointer(&bounds)))); err != nil {
 			log.Printf("调整 Knooo 窗口大小：%v", err)
 		}
@@ -401,6 +452,7 @@ func (w *desktopWindow) show() {
 		command = windows.SW_RESTORE
 	}
 	showWindow.Call(w.hwnd, command)
+	w.resize()
 	setForeground.Call(w.hwnd)
 	if !w.webViewStarted {
 		if err := w.startWebView(); err != nil {

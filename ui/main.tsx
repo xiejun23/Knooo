@@ -39,6 +39,7 @@ if (launchToken) {
  history.replaceState(null, '', location.pathname + location.search);
 }
 const token = sessionStorage.getItem('knooo-launch') ?? '';
+const nativeTitleBar = new URLSearchParams(location.search).get('desktop') === '1';
 
 const nav = [
  { id: 'review', label: '工作回顾', icon: LayoutList }, { id: 'search', label: '搜索', icon: Search },
@@ -279,7 +280,7 @@ function App() {
  useEffect(() => {
   loadConnections().catch(fail).finally(()=>setLoadingConnections(false));
   api<About>('about').then(value=>{setAbout(value);if (!value.demo) void checkUpdate();}).catch(err=>{setAbout(null);fail(err);});
-  api<unknown>('desktop-topmost').then(readWindowPin).then(setWindowPinned).catch(fail);
+  if (!nativeTitleBar) api<unknown>('desktop-topmost').then(readWindowPin).then(setWindowPinned).catch(fail);
   loadListing().catch(fail).finally(()=>setLoadingListing(false));
  },[]);
  useEffect(() => {
@@ -348,10 +349,10 @@ function App() {
  const refreshAction = about?.demo ? undefined : <button className="button secondary" disabled={scanning} onClick={()=>void refresh()}>{refreshing && ready ? <EagleMark flying/> : <RefreshCw size={16}/>} {scanning ? '正在发现会话' : '刷新会话'}</button>;
  return <div className={`shell ${showReader ? 'with-reader' : ''} ${navCollapsed ? 'nav-compact' : ''}`} style={{gridTemplateColumns:narrow ? undefined : `${displayLeft}px minmax(0,1fr)${showReader ? ` ${displayRight}px` : ''}`}}>
   <aside className="rail" id="navigation" aria-label="主导航">
-   <button className="brand" aria-label="Knooo 首页" title="Knooo" onClick={()=>navigate('review')}>
+   {!nativeTitleBar && <button className="brand" aria-label="Knooo 首页" title="Knooo" onClick={()=>navigate('review')}>
     <EagleMark/>
     <span className="brand-wordmark" aria-hidden="true"><span>K</span><span>n</span><span>o</span><span>o</span><span>o</span></span>
-   </button>
+   </button>}
    <div className="rail-navigation">
     <nav className="nav-group" aria-label="工作台">{nav.slice(0,5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
     <nav className="nav-group system" aria-label="应用">{nav.slice(5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
