@@ -26,7 +26,7 @@ import (
 type app struct {
 	mu             sync.RWMutex
 	refresh        sync.Mutex
-	scanned        bool // Protected by refresh.
+	lastScan       time.Time // Protected by refresh.
 	reader         *sessions.Store
 	sessions       []sessions.Session
 	warnings       []string
@@ -210,6 +210,8 @@ func (a *app) routes(ui http.Handler, version, changelog string) http.Handler {
 	mux.HandleFunc("POST /api/models", a.providerModels)
 	mux.HandleFunc("GET /api/search", a.search)
 	mux.HandleFunc("GET /api/search/matches", a.searchMatches)
+	mux.HandleFunc("GET /api/backup", a.exportBackup)
+	mux.HandleFunc("POST /api/backup", a.restoreBackup)
 	mux.HandleFunc("GET /api/notes", a.notes)
 	mux.HandleFunc("POST /api/notes", a.saveNote)
 	mux.HandleFunc("GET /api/report", a.report)
@@ -228,13 +230,17 @@ func (a *app) routes(ui http.Handler, version, changelog string) http.Handler {
 }
 
 func (a *app) ensureSessionIndex() {
+	a.ensureSessionIndexAge(0)
+}
+
+func (a *app) ensureSessionIndexAge(maxAge time.Duration) {
 	if a.demo || a.reader == nil {
 		return
 	}
 	a.refresh.Lock()
 	defer a.refresh.Unlock()
-	if !a.scanned {
-		a.scanSources(a.sources, "startup")
+	if a.lastScan.IsZero() || (maxAge > 0 && time.Since(a.lastScan) >= maxAge) {
+		a.scanSources(a.sources, "auto")
 	}
 }
 
@@ -299,8 +305,8 @@ func (a *app) scanSources(sources map[string][]string, trigger string) {
 	a.mu.Unlock()
 	elapsed := time.Since(started)
 
-	wasScanned := a.scanned
-	a.scanned = true
+	wasScanned := !a.lastScan.IsZero()
+	a.lastScan = time.Now()
 
 	if !wasScanned {
 		trigger = "startup"
@@ -360,23 +366,20 @@ func inputs(s sessions.Session) []distill.Input {
 	return result
 }
 
-func (a *app) allTopics(ctx context.Context) (map[string][]distill.Topic, error) {
+func (a *app) allTopics(ctx context.Context) (map[string]json.RawMessage, error) {
 	rows, err := a.db.QueryContext(ctx, `SELECT session,content FROM topics`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	result := map[string][]distill.Topic{}
+	result := map[string]json.RawMessage{}
 	for rows.Next() {
-		var id, content string
+		var id string
+		var content []byte
 		if err := rows.Scan(&id, &content); err != nil {
 			return nil, err
 		}
-		var topics []distill.Topic
-		if err := json.Unmarshal([]byte(content), &topics); err != nil {
-			continue
-		}
-		result[id] = topics
+		result[id] = content
 	}
 	return result, rows.Err()
 }

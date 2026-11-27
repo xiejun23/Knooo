@@ -62,11 +62,15 @@ const historyDate = new Intl.DateTimeFormat('zh-CN', { year:'numeric', month:'2-
 const historyTime = (value:string) => value ? `${historyDate.format(new Date(value))} ${formatTime(value)}` : '';
 const topicStatus: Record<string,string> = {verified:'已验证',resolved:'已解决',open:'待处理',observed:'已观察'};
 
-async function api<T>(path: string, data?: unknown, signal?: AbortSignal): Promise<T> {
+async function request(path: string, data?: unknown, signal?: AbortSignal): Promise<Response> {
  const headers = { Authorization: `Bearer ${token}` };
- const response = await fetch(`/api/${path}`, data === undefined ? {signal,headers} : {method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(data),signal});
+ const response = await fetch(`/api/${path}`, data === undefined ? {signal,headers} : {method:'POST',headers:{...headers,'Content-Type':'application/json'},body:data instanceof File ? data : JSON.stringify(data),signal});
  if (!response.ok) throw new Error((await response.text()).trim() || '操作失败');
- return response.json();
+ return response;
+}
+
+async function api<T>(path: string, data?: unknown, signal?: AbortSignal): Promise<T> {
+ return (await request(path, data, signal)).json();
 }
 
 function readWindowPin(response: unknown) {
@@ -310,11 +314,17 @@ function App() {
   const params = new URLSearchParams(searchScope);
   params.set('page',String(searchPage));
   api<SearchPage>(`search?${params}`,undefined,controller.signal)
-   .then(next=>{if (!controller.signal.aborted) setSearchResult(next);})
+   .then(next=>{
+    if (controller.signal.aborted) return;
+    setSearchResult(next);
+    if (next.hits.some(hit=>hit.matches.some(match=>!sessionMap.has(match.sessionId)))) {
+     void loadListing().catch(fail);
+    }
+   })
    .catch(err=>{if (!controller.signal.aborted) {setSearchResult(undefined);fail(err);}})
    .finally(()=>{if (!controller.signal.aborted) setSearching(false);});
   return () => controller.abort();
- },[page,searched,searchScope,searchPage,listing]);
+ },[page,searched,searchScope,searchPage,searchPosition,listing]);
  useEffect(() => {
   if (page!=='notes') return;
   const controller = new AbortController();
@@ -377,6 +387,7 @@ function App() {
      {review ? <WorkReview review={review} selected={reviewProjects} onSelect={setReviewProjects}
       collapsed={collapsedReviewProjects} onCollapse={setCollapsedReviewProjects}
       demo={about?.demo===true} onSettings={()=>navigate('settings')} onLogs={()=>navigate('logs',true)}
+      onBrowse={()=>navigate('sessions')} onSearch={()=>{navigate('search');searchBox.current?.focus();}}
       onRetry={retryReviewSession} onSaveNote={saveReviewNote} open={open}/> : !error && <EagleLoading label="正在读取工作回顾"/>}
     </>}
     {page==='sessions' && <>
@@ -384,7 +395,7 @@ function App() {
      <SessionLibrary listing={listing} scanning={scanning} selected={focus?.id} open={(id,anchor)=>open(id,anchor,'raw')} reload={loadListing} onError={fail} onNotice={setNotice}/>
     </>}
     {page==='search' && <>
-     <Heading title="搜索" description="查找会话原文、标题或来源路径。"/>
+     <Heading title="搜索" description="查找会话原文、标题或来源路径。" action={refreshAction}/>
      <form className="search-page-form" onSubmit={search}><Search size={21}/><input aria-label="搜索关键字" placeholder="输入关键字、错误码或文件路径" value={query} onChange={e=>setQuery(e.target.value)}/><button className="button primary" type="submit">搜索</button></form>
      <div className="review-controls">{filter}</div>
      {searching ? <EagleLoading label="正在搜索会话"/> : searchResult?.hits.map(h=><SearchResult key={h.sessionId} hit={h} sessions={sessionMap} open={open} searchScope={searchScope}/>)}
@@ -394,7 +405,9 @@ function App() {
     {page==='notes' && <><Heading title="知识库" description="把会话里值得复用的经验和练习保存下来。"/>{!notes ? <EagleLoading label="正在读取知识库"/> : notes.map(n=><article className="search-hit" key={n.id}><h3>{n.topic.title}</h3><p>{n.topic.lesson || n.topic.outcome || n.topic.problem}</p>{n.topic.exercise && <p className="muted">练习 · {n.topic.exercise}</p>}{n.topic.evidenceStale && <p className="feedback error">原文依据已变更或需要核对。</p>}<button className="button secondary" onClick={()=>{const id=n.topic.evidenceStale ? undefined : n.topic.evidence[0];open(n.sessionId,id,'raw',id ? n.topic.evidenceVersions?.[id] : undefined);}}>查看原文 <ArrowUpRight size={15}/></button></article>)}{notes?.length===0 && !error && <Empty icon={<BookOpen size={25}/>} title="还没有知识条目"><p>打开一条会话，在主题里点击「存入知识库」。</p><button className="button secondary" onClick={()=>navigate('sessions')}>查看会话 <ArrowRight size={15}/></button></Empty>}</>}
     {page==='reports' && <><Heading title="工作报告" description="从工作回顾提炼所选期间的成果、发现和下一步。"/><Reports listing={listing} agentCounts={activeAgents} selectedAgents={selectedAgents} onAgentsChange={setAgents} profiles={connections.profiles} onOpen={open} fail={fail}/></>}
     {page==='logs' && <><Heading title="平台日志" description="按级别、模块与时间范围排查会话扫描、自动回顾和模型连接记录。"/><PlatformLogs key={String(reviewLogs)} api={api} sessions={sessionMap} reviewOnly={reviewLogs} open={id=>open(id,undefined,'raw')}/></>}
-    {page==='settings' && <><Heading title="本机设置" description="管理接入平台的算力提供商与后台默认调用配置。"/>{loadingConnections || about===undefined ? <EagleLoading label="正在读取本机设置"/> : <SettingsWorkspace connections={connections} api={api} onChange={loadConnections} demo={about?.demo===true}/>}</>}
+    {page==='settings' && <><Heading title="本机设置" description="管理模型连接、自动回顾与工作区备份。"/>{loadingConnections || about===undefined ? <EagleLoading label="正在读取本机设置"/> : <SettingsWorkspace connections={connections} api={api} onChange={loadConnections} demo={about?.demo===true}
+     downloadBackup={async()=> (await request('backup')).blob()}
+     onRestore={()=>{setReviewTick(tick=>tick+1);void loadListing().catch(fail);}}/>}</>}
     {page==='about' && <>
      <Heading title="关于"/>
      {about === undefined && <EagleLoading label="正在读取版本信息"/>}
@@ -596,10 +609,10 @@ function ReviewSessionBlock({entry,collapsed,onToggle,focusedMode,statusFilter,s
  </article>;
 }
 
-function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettings,onLogs,onRetry,onSaveNote,open}: {
+function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettings,onLogs,onBrowse,onSearch,onRetry,onSaveNote,open}: {
  review:Review; selected:Map<string,Session>; onSelect:(next:Map<string,Session>)=>void;
  collapsed:Set<string>; onCollapse:(next:Set<string>)=>void;
- demo:boolean; onSettings:()=>void; onLogs:()=>void;
+ demo:boolean; onSettings:()=>void; onLogs:()=>void; onBrowse:()=>void; onSearch:()=>void;
  onRetry:RetryReview;
  onSaveNote:(sessionId:string,topic:Topic)=>Promise<void>;
  open:OpenSession;
@@ -676,7 +689,14 @@ function WorkReview({review,selected,onSelect,collapsed,onCollapse,demo,onSettin
  }
 
  return <>
-  {!demo && !review.connectionId && <div className="feedback"><span>选择默认模型后，Knooo 会自动提炼已导入会话。</span><button className="button secondary" onClick={onSettings}>设置默认模型 <ArrowRight size={15}/></button></div>}
+  {!demo && !review.connectionId && <div className="feedback review-onboarding">
+   <span>可直接浏览或搜索本机会话。设置默认模型后，Knooo 会自动提炼工作回顾。</span>
+   <div className="settings-actions">
+    <button className="button secondary" onClick={onBrowse}>浏览会话</button>
+    <button className="button secondary" onClick={onSearch}>搜索原文</button>
+    <button className="button secondary" onClick={onSettings}>设置默认模型 <ArrowRight size={15}/></button>
+   </div>
+  </div>}
   {review.error && <div className="feedback error" role="alert"><span>{review.error}</span><div className="filters">
    <button className="button secondary" onClick={onLogs}>查看回顾日志</button>
    {review.settingsError && <button className="button secondary" onClick={onSettings}>检查模型设置</button>}

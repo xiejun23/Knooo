@@ -3,11 +3,13 @@ package studio
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -17,6 +19,7 @@ import (
 
 const searchPageSize = 20
 const searchMatchSize = 6
+const searchIndexMaxAge = 15 * time.Second
 
 type hit struct {
 	SessionID    string        `json:"sessionId"`
@@ -180,7 +183,7 @@ func (a *app) search(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	a.ensureSessionIndex()
+	a.ensureSessionIndexAge(searchIndexMaxAge)
 	ctx := r.Context()
 	archived, err := a.archivedSessions(ctx)
 	if err != nil {
@@ -212,7 +215,11 @@ func (a *app) search(w http.ResponseWriter, r *http.Request) {
 		}
 		t := distill.Topic{Title: s.Title, Problem: matches[0].Snippet, Status: "observed"}
 		best := 0
-		for _, candidate := range checkTopicEvidence(saved[s.ID], s.Messages) {
+		var topics []distill.Topic
+		if content := saved[s.ID]; content != nil && json.Unmarshal(content, &topics) != nil {
+			topics = nil
+		}
+		for _, candidate := range checkTopicEvidence(topics, s.Messages) {
 			if candidate.EvidenceStale {
 				continue
 			}

@@ -4,10 +4,47 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiejun23/Knooo/internal/sessions"
 )
+
+func TestSearchRefreshesStaleSessionIndex(t *testing.T) {
+	isolateSessionEnvironment(t)
+	home := t.TempDir()
+	dir := filepath.Join(home, ".codex", "sessions")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(sessions.New(home), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	reviewTestRequest(t, a, http.MethodGet, "/api/sessions", "")
+	data, err := os.ReadFile("../sessions/testdata/codex.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rollout-new.jsonl"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	const searchPath = "/api/search?q=codex-fixture&page=1"
+	if raw := reviewTestRequest(t, a, http.MethodGet, searchPath, ""); !strings.Contains(raw, `"total":0`) {
+		t.Fatalf("search refreshed a recent index: %s", raw)
+	}
+	a.refresh.Lock()
+	a.lastScan = time.Now().Add(-time.Minute)
+	a.refresh.Unlock()
+	raw := reviewTestRequest(t, a, http.MethodGet, searchPath, "")
+	if !strings.Contains(raw, `"total":1`) {
+		t.Fatalf("search missed the new transcript: %s", raw)
+	}
+}
 
 func TestSearchPagesGroupsAndMessages(t *testing.T) {
 	a, err := New(nil, "", true)

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
  ArrowDown, ArrowLeft, Check, ChevronDown, ChevronRight, CirclePlus, Cpu, Database,
- Download, Eye, EyeOff, Link2, Plug, RefreshCw, Save, Search, Sparkles, Trash2, X,
+ Download, Eye, EyeOff, Link2, Plug, RefreshCw, Save, Search, Sparkles, Trash2, Upload, X,
 } from 'lucide-react';
 import { EagleMark } from './eagle';
+import { dateValue } from './date-range';
 import {
  analyzeQuickInput,
  buildDirectoryGroups,
@@ -75,8 +76,9 @@ function ConnectionIcon({ id, size = 18 }: { id: string; size?: number }) {
  </span>;
 }
 
-export function SettingsWorkspace({ connections, api, onChange, demo }: {
+export function SettingsWorkspace({ connections, api, onChange, demo, downloadBackup, onRestore }: {
  connections: Connections; api: API; onChange: () => Promise<void>; demo: boolean;
+ downloadBackup: () => Promise<Blob>; onRestore: () => void;
 }) {
  const [reviewConnectionId, setReviewConnectionId] = useState<string | undefined>(demo ? '' : undefined);
  const [reviewMaxAgeDays, setReviewMaxAgeDays] = useState<number>(0);
@@ -120,7 +122,68 @@ export function SettingsWorkspace({ connections, api, onChange, demo }: {
    onSavedChange={(id, days) => { setReviewConnectionId(id); setReviewMaxAgeDays(days); setReviewWindowError(''); }}
   />}
   {!editing && !demo && <DesktopStartupSettings api={api}/>}
+  {!editing && !demo && <WorkspaceBackup api={api} download={downloadBackup} onRestore={onRestore}/>}
  </div>;
+}
+
+function WorkspaceBackup({ api, download, onRestore }: {
+ api: API; download: () => Promise<Blob>; onRestore: () => void;
+}) {
+ const fileInput = useRef<HTMLInputElement>(null);
+ const [pending, setPending] = useState<'export' | 'import'>();
+ const [feedback, setFeedback] = useState<{ message: string; error?: boolean }>();
+
+ async function exportBackup() {
+  setPending('export');
+  setFeedback(undefined);
+  try {
+   const url = URL.createObjectURL(await download());
+   const link = document.createElement('a');
+   link.href = url;
+   link.download = `Knooo-backup-${dateValue(new Date())}.json`;
+   link.click();
+   setTimeout(() => URL.revokeObjectURL(url), 1000);
+   setFeedback({ message: '已生成备份文件。' });
+  } catch (err) {
+   setFeedback({ message: err instanceof Error ? err.message : String(err), error: true });
+  } finally {
+   setPending(undefined);
+  }
+ }
+
+ async function importBackup(file: File) {
+  setPending('import');
+  setFeedback(undefined);
+  try {
+   const result = await api<{ added: number; skipped: number }>('backup', file);
+   setFeedback({ message: `导入完成，新增 ${result.added} 项，跳过 ${result.skipped} 项。` });
+   if (result.added > 0) onRestore();
+  } catch (err) {
+   setFeedback({ message: err instanceof Error ? err.message : String(err), error: true });
+  } finally {
+   setPending(undefined);
+  }
+ }
+
+ return <section className="settings-box workspace-backup">
+  <h2>工作区备份</h2>
+  <p>备份主题、知识条目、会话归档状态、工作回顾和报告。模型连接和 Agent 原始会话需另行迁移。</p>
+  <p>导入会补入缺失条目，已有条目会跳过。</p>
+  <div className="settings-actions">
+   <button type="button" className="button secondary" disabled={!!pending} onClick={() => void exportBackup()}>
+    <Download size={15}/>{pending === 'export' ? '正在导出…' : '导出备份'}
+   </button>
+   <button type="button" className="button secondary" disabled={!!pending} onClick={() => fileInput.current?.click()}>
+    <Upload size={15}/>{pending === 'import' ? '正在导入…' : '导入备份'}
+   </button>
+   <input ref={fileInput} type="file" accept=".json,application/json" hidden onChange={event => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (file) void importBackup(file);
+   }}/>
+  </div>
+  {feedback && <p className={feedback.error ? 'inline-error' : 'inline-note'} role={feedback.error ? 'alert' : 'status'}>{feedback.message}</p>}
+ </section>;
 }
 
 type DesktopStartupState = 'unavailable' | 'off' | 'on' | 'blocked';

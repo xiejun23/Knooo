@@ -279,6 +279,8 @@ kbd { padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; font: i
 .session-source p { margin: 0; padding: 0 10px 8px; color: var(--muted); font-size: 12px; }
 .feedback, .inline-error, .inline-note { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 12px; border-radius: 5px; background: var(--blue-pale); color: #174d87; overflow-wrap: anywhere; }
 .feedback .icon-button { margin-left: auto; }
+.review-onboarding { flex-wrap: wrap; justify-content: space-between; }
+.review-onboarding .settings-actions { margin-top: 0; }
 .feedback.error, .inline-error { color: #8c302c; background: #fff1ee; }
 .logs-page { container-type: inline-size; }
 .logs-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 12px; margin-bottom: 16px; }
@@ -604,7 +606,9 @@ kbd { padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; font: i
 .auto-review-row label { flex: 1 1 240px; margin-bottom: 0; }
 .auto-review-row label.auto-review-scope { flex: 0 1 180px; }
 .auto-review-card .provider-hint, .auto-review-card .inline-error, .auto-review-card .inline-note { margin: 10px 0 0; }
-.desktop-startup { padding: 18px 20px; margin-bottom: 0; }
+.desktop-startup, .workspace-backup { padding: 18px 20px; margin-bottom: 0; }
+.workspace-backup > p:not([role]) { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.workspace-backup > [role] { margin: 10px 0 0; }
 .desktop-startup-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .desktop-startup-row p, .desktop-startup [role="status"] { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
 .desktop-startup .inline-error { margin: 10px 0 0; }
