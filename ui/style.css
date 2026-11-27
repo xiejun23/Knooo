@@ -441,11 +441,11 @@ kbd { padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; font: i
 .children { margin-top: 12px; }
 .reader-backdrop { display: none; }
 
-.panel-grip { position: absolute; z-index: 6; top: 0; bottom: 0; width: 10px; cursor: col-resize; touch-action: none; outline-offset: -2px; }
+.panel-grip { position: absolute; z-index: 6; top: 0; bottom: 0; width: 9px; cursor: col-resize; touch-action: none; outline-offset: -2px; }
 .panel-grip-left { right: -5px; }
 .panel-grip-right { left: -5px; }
-.panel-grip:hover, .panel-grip:focus-visible, .resizing-panels .panel-grip:hover { background: #75a6d76b; }
-.panel-grip::after { content: ""; position: absolute; left: 3px; top: calc(50% - 13px); width: 3px; height: 26px; border-radius: 3px; background: #9cb4ce; }
+.panel-grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 2px; background: transparent; transition: background-color 140ms ease; pointer-events: none; }
+.panel-grip:hover::after, .panel-grip:focus-visible::after, .resizing-panels .panel-grip:hover::after { background: #6b9fd4; }
 .resizing-panels, .resizing-panels * { cursor: col-resize !important; user-select: none !important; }
 
 .settings-box { padding: 18px; }

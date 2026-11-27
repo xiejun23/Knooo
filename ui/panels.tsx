@@ -1,8 +1,8 @@
 import type { KeyboardEvent, PointerEvent } from 'react';
 
-export function PanelGrip({ side, width, min, max, onResize, onToggle }: {
+export function PanelGrip({ side, width, min, max, onResize }: {
  side: 'left' | 'right'; width: number; min: number; max: number;
- onResize: (width: number) => void; onToggle: () => void;
+ onResize: (width: number) => void;
 }) {
  const label = side === 'left' ? '导航栏' : '阅读器';
  const direction = side === 'left' ? 1 : -1;
@@ -31,7 +31,6 @@ export function PanelGrip({ side, width, min, max, onResize, onToggle }: {
    case 'ArrowRight': update(width + 16 * direction); break;
    case 'Home': update(min); break;
    case 'End': update(max); break;
-   case 'Enter': onToggle(); break;
    default: return;
   }
   event.preventDefault();
@@ -39,5 +38,5 @@ export function PanelGrip({ side, width, min, max, onResize, onToggle }: {
  return <div className={`panel-grip panel-grip-${side}`} role="separator" aria-orientation="vertical"
   aria-label={`调整${label}宽度`} aria-controls={side === 'left' ? 'navigation' : 'session-reader'}
   aria-valuenow={width} aria-valuemin={min} aria-valuemax={max} tabIndex={0}
-  title={`拖动调整${label}宽度，双击收起`} onPointerDown={start} onKeyDown={keyboard} onDoubleClick={onToggle}/>;
+  title={`拖动调整${label}宽度`} onPointerDown={start} onKeyDown={keyboard}/>;
 }

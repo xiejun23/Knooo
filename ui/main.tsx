@@ -366,7 +366,7 @@ function App() {
      </button>
     </div>
    </div>}
-   {!narrow && !navCollapsed && <PanelGrip side="left" width={displayLeft} min={leftBounds.min} max={maxLeft} onResize={setLeftWidth} onToggle={()=>{setNavCollapsed(true);navToggle.current?.focus();}}/>}
+   {!narrow && !navCollapsed && <PanelGrip side="left" width={displayLeft} min={leftBounds.min} max={maxLeft} onResize={setLeftWidth}/>}
   </aside>
   <div className="workbench">
    <header className="topbar">
@@ -419,7 +419,7 @@ function App() {
   </div>
   {showReader && narrow && <button className="reader-backdrop" aria-label="收起阅读器" onClick={collapseReader}/>}
   {focus && <Reader key={focus.id} focus={focus} setFocus={setFocus} collapsed={!showReader} close={collapseReader} profile={profile} model={model} demo={about?.demo===true} childrenSessions={listing.sessions.filter(s=>s.parentId===focus.id)} parent={sessionMap.get(sessionMap.get(focus.id)?.parentId ?? '')} open={(id,anchor)=>open(id,anchor,anchor ? 'raw' : focus.tab)}
-   panelGrip={showReader && !narrow && <PanelGrip side="right" width={displayRight} min={rightBounds.min} max={maxRight} onResize={setRightWidth} onToggle={collapseReader}/>}
+   panelGrip={showReader && !narrow && <PanelGrip side="right" width={displayRight} min={rightBounds.min} max={maxRight} onResize={setRightWidth}/>}
    modelPicker={disabled=><ModelPicker key={profileId} profiles={connections.profiles} profileId={profileId} model={model} onSelect={selectProfile} onModel={setModel} api={api} onSettings={()=>navigate('settings')} demo={about?.demo===true} disabled={disabled}/>}/> }
  </div>;
 }

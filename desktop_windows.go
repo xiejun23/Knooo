@@ -324,8 +324,13 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 
 func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
 	if w.titleBar.pin != 0 {
-		if message == wmNCHitTest {
+		switch message {
+		case wmNCHitTest:
 			return w.titleHitTest(hwnd, wParam, lParam)
+		case wmNCMouseMove:
+			w.handleTitleMouseMove(hwnd, lParam)
+		case wmNCMouseLeave:
+			w.handleTitleMouseLeave()
 		}
 		var result uintptr
 		if handled, _, _ := dwmDefWindowProc.Call(hwnd, uintptr(message), wParam, lParam, uintptr(unsafe.Pointer(&result))); handled != 0 {
@@ -399,8 +404,12 @@ func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uin
 		if wParam == webViewStartupTimer && w.webViewStarted && w.controller == nil {
 			w.failWebView(errors.New("启动 WebView2 超时。请检查 Microsoft Edge WebView2 Runtime。"))
 		}
+		if wParam == brandFlightTimer {
+			w.stepBrandFlight()
+		}
 		return 0
 	case wmDestroy, wmExitDesktop:
+		killTimer.Call(hwnd, brandFlightTimer)
 		postQuitMessage.Call(0)
 		return 0
 	case wmShowDesktop:
