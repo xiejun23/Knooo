@@ -12,7 +12,7 @@
 | `ui/`（根目录） | 仅保留前端工程配置：`index.html`、`package.json`、`package-lock.json`、`tsconfig.json` |
 | `packaging/` | Windows NSIS 安装脚本、应用图标资源、发版说明与发布脚本 |
 | `docs/` | 设计文档、项目说明、架构文档与 README 配图资源 |
-| `.github/` | CI 工作流、Dependabot 配置与 Issue / PR 模板 |
+| `.github/` | CI 工作流与 Issue / PR 模板 |
 | 仓库根目录 | **仅允许**标准根文件：`.editorconfig`、`.gitignore`、`AGENTS.md`、`CHANGELOG.md`、`LICENSE`、`Makefile`、`README.md`、`SECURITY.md`、`VERSION`、`embed.go`、`go.mod`、`go.sum` |
 
 ### 禁止事项（防止目录腐化）
