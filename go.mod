@@ -1,6 +1,6 @@
 module github.com/xiejun23/Knooo
 
-go 1.24.0
+go 1.25
 
 require (
 	github.com/wailsapp/go-webview2 v1.0.23
@@ -13,7 +13,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jchv/go-winloader v0.0.0-20210711035445-715c2860da7e // indirect
-	github.com/klauspost/compress v1.18.3
+	github.com/klauspost/compress v1.20.5
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
