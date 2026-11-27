@@ -1,12 +1,21 @@
 <div align="center">
-  <img src="ui/assets/eagle.png" width="100" height="100" alt="">
+  <img src="ui/src/assets/eagle.png" width="100" height="100" alt="Knooo">
   <h1>Knooo</h1>
   <p><strong>让知识成为一种可以被看见的回声</strong></p>
-  <p>为开发者打造的 AI Agent 会话与工作回顾桌面应用</p>
+  <p>为开发者打造的本地 AI Agent 会话搜索与工作回顾桌面应用</p>
+  <p>
+    <a href="https://github.com/xiejun23/Knooo/actions/workflows/checks.yml"><img src="https://github.com/xiejun23/Knooo/actions/workflows/checks.yml/badge.svg" alt="Build and test"></a>
+    <a href="https://github.com/xiejun23/Knooo/releases/latest"><img src="https://img.shields.io/github/v/release/xiejun23/Knooo" alt="Latest release"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  </p>
   <p>
     <a href="https://github.com/xiejun23/Knooo/releases/latest/download/Knooo-Setup-windows-x64.exe"><img src="docs/assets/windows-download.svg" width="224" height="44" alt="下载 Windows x64 安装版"></a>
   </p>
-  <p><a href="https://github.com/xiejun23/Knooo/releases/latest">查看便携版和其他下载</a></p>
+  <p>
+    <a href="https://knooo.xebron.top/">官网下载</a> ·
+    <a href="https://github.com/xiejun23/Knooo/releases/latest">便携版与其他下载</a> ·
+    <a href="CHANGELOG.md">版本记录</a>
+  </p>
 </div>
 
 ## 快速开始
@@ -19,7 +28,7 @@
 
 ## 你可以用 Knooo 做什么
 
-- **找回上下文。** 在 Codex、Claude Code、Antigravity 等 Agent 的会话里搜索关键词，也可在 Windows 查看运行中的 WSL 发行版里的会话。
+- **找回上下文。** 在 Codex、Claude Code、Antigravity、Gemini CLI 等 Agent 的会话里搜索关键词，也可在 Windows 查看运行中的 WSL 发行版里的会话。
 - **回顾项目进展。** 按项目查看做过哪些事、采用了什么方法、结果如何，并点开原文核对。值得复用的经验可以存入知识库。
 - **整理工作报告。** 用已有回顾生成日报、周报、月报或自选日期报告，编辑后导出 Markdown。
 
@@ -31,4 +40,13 @@
 
 名字取意于 **Knowledge（知识）**、**Observer（观察者）** 和 **Orbit（轨道）**。从会话里观察工作的经过，把值得复用的知识连同依据留下来，让它在下一次需要时回到手边。
 
-[版本记录](CHANGELOG.md) · [提交反馈](https://github.com/xiejun23/Knooo/issues) · [构建与发行](packaging/README.md)
+## 源码开发
+
+```bash
+make ui-install   # 安装前端依赖
+make dev          # 构建前端并启动本机预览
+make test         # 运行前端类型检查与全部 Go 测试
+make package-win  # 交叉编译 Windows 便携版与安装包
+```
+
+[版本记录](CHANGELOG.md) · [安全策略](SECURITY.md) · [提交反馈](https://github.com/xiejun23/Knooo/issues) · [构建与发行](packaging/README.md)

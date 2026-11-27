@@ -1,0 +1,23 @@
+name: 功能建议 (Feature Request)
+description: 提出新功能想法或体验优化建议
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的使用场景或痛点
+      placeholder: 描述当前工作流中不顺手的地方。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的解决方案
+      placeholder: 描述你希望 Knooo 如何解决这个问题。
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充参考（可选）
+      placeholder: 相关截图、示例或其他说明。

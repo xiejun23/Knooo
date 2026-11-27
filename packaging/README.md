@@ -52,7 +52,7 @@ Knooo 启动时检查 GitHub 上的正式版，使用中每小时检查一次。
 
 应用使用匿名 GitHub 请求检查更新。面向所有用户发布时，仓库和正式 Release 需要公开可访问。
 
-更换应用图标时，同步更新 `ui/assets/eagle.png` 和 `packaging/eagle.ico`，然后在 `packaging/` 目录重新生成 Windows 图标资源。
+更换应用图标时，同步更新 `ui/src/assets/eagle.png` 和 `packaging/eagle.ico`，然后在 `packaging/` 目录重新生成 Windows 图标资源。
 
 ```bash
 x86_64-w64-mingw32-windres eagle.rc -O coff -o ../cmd/knooo/eagle_windows_amd64.syso
