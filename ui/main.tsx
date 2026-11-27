@@ -141,7 +141,7 @@ function App() {
  const displayLeft = Math.min(left,maxLeft);
  const navToggleLabel = navCollapsed ? '展开导航栏' : '收起导航栏';
  const NavToggleIcon = navCollapsed ? PanelLeftOpen : PanelLeftClose;
- const appVersion = `v${about?.version ?? '0.1.2'}`;
+ const appVersion = about ? `v${about.version}` : '';
 
  async function checkUpdate() {
   if (updateBusy.current) return;
@@ -358,7 +358,7 @@ function App() {
     <nav className="nav-group system" aria-label="应用">{nav.slice(5).map(({id,label,icon:Icon})=><button key={id} className={`nav-item ${page===id ? 'active' : ''}`} title={label} aria-label={label} aria-current={page===id ? 'page' : undefined} onClick={()=>navigate(id)}><Icon size={18} strokeWidth={1.75}/><span>{label}</span></button>)}</nav>
    </div>
    {!narrow && <div className="rail-footer">
-    <div className="rail-bottom">{about?.demo && <div><span className="connection-dot"/><span>演示工作区</span></div>}<button type="button" aria-label={`关于 Knooo，${appVersion}`} onClick={()=>navigate('about')}>{appVersion}</button></div>
+    <div className="rail-bottom">{about?.demo && <div><span className="connection-dot"/><span>演示工作区</span></div>}<button type="button" aria-label={appVersion ? `关于 Knooo，${appVersion}` : '关于 Knooo'} onClick={()=>navigate('about')}>{appVersion || '关于'}</button></div>
     <div className="nav-group rail-controls">
      <button ref={navToggle} type="button" className="nav-item" aria-controls="navigation" aria-expanded={!navCollapsed}
       aria-label={navToggleLabel} onClick={()=>setNavCollapsed(value=>!value)}>

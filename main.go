@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,7 +30,8 @@ var assets embed.FS
 //go:embed config.json
 var startupConfig []byte
 
-var version = "0.1.2"
+//go:embed VERSION
+var buildVersion string
 
 func main() {
 	var config struct {
@@ -102,6 +104,7 @@ func run(defaultAddress, listen, data string, noOpen, demo, tray bool) error {
 	changelog, _ := assets.ReadFile("CHANGELOG.md")
 	stop := make(chan struct{})
 	shutdown := sync.OnceFunc(func() { close(stop) })
+	version := strings.TrimSpace(buildVersion)
 	updates := update.Handler(version, !demo, canInstall, shutdown)
 	server := &http.Server{
 		Handler:           a.Handler(addr, token, http.FileServer(http.FS(ui)), version, string(changelog), updates, desktop.topmost),

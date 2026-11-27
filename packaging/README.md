@@ -27,15 +27,15 @@ npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
 npm run build
 go test ./...
 
-version=0.1.2
+version=$(cat VERSION)
 mkdir -p build
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false \
-  -ldflags "-H=windowsgui -X main.version=$version" -o build/Knooo-windows-x64.exe .
+  -ldflags "-H=windowsgui" -o build/Knooo-windows-x64.exe .
 makensis -WX -DAPP_VERSION="$version" packaging/windows.nsi
 (cd build && sha256sum Knooo-windows-x64.exe Knooo-Setup-windows-x64.exe > SHA256SUMS.txt)
 ```
 
-`.github/workflows/release.yml` 在推送带 `v` 前缀的版本 tag 时构建并发布这三个文件。CI 将 tag 去掉 `v` 后写入程序版本和 Windows 卸载条目。`v0.1.0-rc.1` 一类的 tag 会发布为预发行版本。
+`VERSION` 提供应用和 Windows 安装包的版本号。`.github/workflows/release.yml` 在推送与 `VERSION` 匹配的版本标签时构建并发布这三个文件。标签需加 `v` 前缀，例如 `v0.1.3`。`v0.1.3-rc.1` 一类的标签会发布为预发行版本。
 
 ## 准备版本日志
 
@@ -43,7 +43,7 @@ makensis -WX -DAPP_VERSION="$version" packaging/windows.nsi
 
 1. 用 `git fetch origin --tags` 拉取版本标签。用 `git tag --merged HEAD --sort=-version:refname` 查看当前分支可达的标签。正式版比较上一个已发布的正式版本。预发行版可以比较上一个已发布的候选版本或正式版。通过 GitHub Releases 核对基线。
 2. 用 `git log <上一版>..HEAD`、`git diff --stat <上一版>` 和 `git diff <上一版>` 检查提交与本地待发布改动。首发还没有标签时，以待发布源码和测试结果为依据。
-3. 在 `CHANGELOG.md` 顶部加入 `## vX.Y.Z · YYYY-MM-DD`，用 `- [更新] **简明标题**：说明内容。` 格式写清用户能感知的变化（类型支持 `更新`、`优化`、`公告`、`下线`，必要时可用 `修复`）。同一版本跨越多个日期时，可在版本下用 `### YYYY-MM-DD` 分组。有迁移步骤时把操作写进条目。保留已发布版本的日志。
+3. 将新版本号写入 `VERSION`，例如 `0.1.3`。在 `CHANGELOG.md` 顶部加入 `## vX.Y.Z · YYYY-MM-DD`，用 `- [更新] **简明标题**：说明内容。` 格式写清用户能感知的变化（类型支持 `更新`、`优化`、`公告`、`下线`，必要时可用 `修复`）。同一版本跨越多个日期时，可在版本下用 `### YYYY-MM-DD` 分组。有迁移步骤时把操作写进条目。保留已发布版本的日志。
 4. 运行 `bash packaging/release-notes.sh vX.Y.Z`，确认输出的是本次更新内容。提交日志和待发布改动后，在需要发版时把标签打到该提交并推送。CI 用同一节生成 GitHub Release 正文。
 
 ## 应用内更新
