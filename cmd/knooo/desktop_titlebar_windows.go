@@ -630,7 +630,7 @@ func (w *desktopWindow) drawPinGlyph(dc uintptr, rect windows.Rect, color uintpt
 }
 
 func loadTitleEagle() *image.NRGBA {
-	matches, err := fs.Glob(assets, "dist/assets/eagle-*.png")
+	matches, err := fs.Glob(assets, "ui/dist/assets/eagle-*.png")
 	if err != nil || len(matches) == 0 {
 		return nil
 	}

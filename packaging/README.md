@@ -14,7 +14,7 @@
 
 覆盖安装 v0.1.0 时，沿用原安装目录。安装器会将 `Knooo-Studio.exe` 替换为 `Knooo.exe`，并迁移已有的登录启动项。
 
-应用按内置配置监听 `127.0.0.1:48763`，端口被占用时自动使用空闲的本机端口。从源码调试时可用 `go run . -no-open` 在终端查看地址。Linux 开发预览使用 `xdg-open`，WSL 优先调用 Windows 默认浏览器。
+应用按内置配置监听 `127.0.0.1:48763`，端口被占用时自动使用空闲的本机端口。从源码调试时可用 `go run ./cmd/knooo -no-open` 在终端查看地址。Linux 开发预览使用 `xdg-open`，WSL 优先调用 Windows 默认浏览器。
 
 ## 本地构建
 
@@ -23,14 +23,14 @@
 ```bash
 sudo apt-get update
 sudo apt-get install -y nsis=3.09-4ubuntu1 nsis-common=3.09-4ubuntu1
-npm ci --registry=https://registry.npmjs.org --replace-registry-host=always
-npm run build
+npm --prefix ui ci --registry=https://registry.npmjs.org --replace-registry-host=always
+npm --prefix ui run build
 go test ./...
 
 version=$(cat VERSION)
 mkdir -p build
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false \
-  -ldflags "-H=windowsgui" -o build/Knooo-windows-x64.exe .
+  -ldflags "-H=windowsgui" -o build/Knooo-windows-x64.exe ./cmd/knooo
 makensis -WX -DAPP_VERSION="$version" packaging/windows.nsi
 (cd build && sha256sum Knooo-windows-x64.exe Knooo-Setup-windows-x64.exe > SHA256SUMS.txt)
 ```
@@ -55,11 +55,11 @@ Knooo 启动时检查 GitHub 上的正式版，使用中每小时检查一次。
 更换应用图标时，同步更新 `ui/assets/eagle.png` 和 `packaging/eagle.ico`，然后在 `packaging/` 目录重新生成 Windows 图标资源。
 
 ```bash
-x86_64-w64-mingw32-windres eagle.rc -O coff -o ../eagle_windows_amd64.syso
+x86_64-w64-mingw32-windres eagle.rc -O coff -o ../cmd/knooo/eagle_windows_amd64.syso
 ```
 
 也可用 Windows SDK 的 `rc.exe /fo eagle.res eagle.rc` 和 `cvtres.exe /machine:x64 /out:eagle.obj eagle.res`。随后在 WSL 生成 Go 链接器可用的资源文件。
 
 ```bash
-objcopy --strip-debug --strip-symbol='@comp.id' --strip-symbol='@feat.00' eagle.obj ../eagle_windows_amd64.syso
+objcopy --strip-debug --strip-symbol='@comp.id' --strip-symbol='@feat.00' eagle.obj ../cmd/knooo/eagle_windows_amd64.syso
 ```

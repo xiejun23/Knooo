@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"embed"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -19,19 +19,16 @@ import (
 	"sync"
 	"time"
 
+	knooo "github.com/xiejun23/Knooo"
 	"github.com/xiejun23/Knooo/internal/sessions"
 	"github.com/xiejun23/Knooo/internal/studio"
 	"github.com/xiejun23/Knooo/internal/update"
 )
 
-//go:embed dist CHANGELOG.md
-var assets embed.FS
-
 //go:embed config.json
 var startupConfig []byte
 
-//go:embed VERSION
-var buildVersion string
+var assets = knooo.Assets
 
 func main() {
 	var config struct {
@@ -94,17 +91,17 @@ func run(defaultAddress, listen, data string, noOpen, demo, tray bool) error {
 		return err
 	}
 	defer a.Close()
-	ui, err := fs.Sub(assets, "dist")
+	ui, err := fs.Sub(knooo.Assets, "ui/dist")
 	if err != nil {
 		return err
 	}
 	addr := listener.Addr().String()
 	token := rand.Text()
 	url := "http://" + addr + "/#open=" + token
-	changelog, _ := assets.ReadFile("CHANGELOG.md")
+	changelog, _ := knooo.Assets.ReadFile("CHANGELOG.md")
 	stop := make(chan struct{})
 	shutdown := sync.OnceFunc(func() { close(stop) })
-	version := strings.TrimSpace(buildVersion)
+	version := strings.TrimSpace(knooo.Version)
 	updates := update.Handler(version, !demo, canInstall, shutdown)
 	server := &http.Server{
 		Handler:           a.Handler(addr, token, http.FileServer(http.FS(ui)), version, string(changelog), updates, desktop.topmost),
