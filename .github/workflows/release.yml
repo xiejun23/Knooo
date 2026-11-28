@@ -1,4 +1,4 @@
-name: Windows x64 release
+name: Windows and macOS release
 
 on:
   push:
@@ -133,8 +133,11 @@ jobs:
             throw 'Uninstall did not remove Knooo and its startup registration'
           }
 
+  macos:
+    uses: ./.github/workflows/macos.yml
+
   publish:
-    needs: smoke-windows
+    needs: [smoke-windows, macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -142,11 +145,15 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: windows-x64
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: macos-universal
       - name: Publish GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          sha256sum Knooo-macOS-universal.dmg >> SHA256SUMS.txt
           sha256sum --check SHA256SUMS.txt
           release_flags=()
           if [[ "${GITHUB_REF_NAME%%+*}" == *-* ]]; then
@@ -154,4 +161,4 @@ jobs:
           fi
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --notes-file release-notes.md "${release_flags[@]}" \
-            Knooo-windows-x64.exe Knooo-Setup-windows-x64.exe SHA256SUMS.txt
+            Knooo-windows-x64.exe Knooo-Setup-windows-x64.exe Knooo-macOS-universal.dmg SHA256SUMS.txt

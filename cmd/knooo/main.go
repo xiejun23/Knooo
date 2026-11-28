@@ -110,21 +110,15 @@ func run(defaultAddress, listen, data string, noOpen, demo, tray bool) error {
 	}
 	fmt.Println(url)
 	served := make(chan error, 1)
-	go func() { served <- server.Serve(listener) }()
-	var desktopDone chan error
+	go func() {
+		served <- server.Serve(listener)
+		shutdown()
+	}()
 	if desktop != nil {
-		desktopDone = make(chan error, 1)
-		go func() { desktopDone <- desktop.run(url, data, stop) }()
-	}
-
-	select {
-	case err = <-served:
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
-		}
-	case err = <-desktopDone:
-		desktopDone = nil
-	case <-stop:
+		// AppKit runs its event loop on the process's original main thread.
+		err = desktop.run(url, data, stop)
+	} else {
+		<-stop
 	}
 	shutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -133,10 +127,8 @@ func run(defaultAddress, listen, data string, noOpen, demo, tray bool) error {
 		log.Printf("关闭 Knooo 服务：%v", err)
 		_ = server.Close()
 	}
-	if desktopDone != nil {
-		if desktopErr := <-desktopDone; err == nil {
-			err = desktopErr
-		}
+	if serveErr := <-served; !errors.Is(serveErr, http.ErrServerClosed) {
+		err = errors.Join(err, serveErr)
 	}
 	return err
 }

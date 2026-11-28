@@ -13,6 +13,7 @@
   </p>
   <p>
     <a href="https://knooo.xebron.top/">官网下载</a> ·
+    <a href="https://github.com/xiejun23/Knooo/releases/latest/download/Knooo-macOS-universal.dmg">下载 macOS 通用版</a> ·
     <a href="https://github.com/xiejun23/Knooo/releases/latest">便携版与其他下载</a> ·
     <a href="CHANGELOG.md">版本记录</a>
   </p>
@@ -20,8 +21,8 @@
 
 ## 快速开始
 
-1. **安装 Knooo。** 下载并双击 `Knooo-Setup-windows-x64.exe`，按提示完成安装。
-2. **打开「会话」。** 从开始菜单启动 Knooo。应用会自动读取本机支持的 Agent 会话。若没看到某段历史，可点「扫描来源」查看读取状态。
+1. **安装 Knooo。** Windows x64 用户运行 `Knooo-Setup-windows-x64.exe`。macOS 13 及以上用户打开 `Knooo-macOS-universal.dmg`，将 Knooo 拖入「应用程序」。Apple 芯片和 Intel Mac 使用同一个文件。
+2. **打开「会话」。** 从 Windows 开始菜单或 Mac 的「应用程序」启动 Knooo。应用会自动读取本机支持的 Agent 会话。若没看到某段历史，可点「扫描来源」查看读取状态。
 3. **搜一段旧对话。** 在「搜索」输入记得的关键词，从结果直接跳到命中的原文。浏览和搜索无需配置模型。
 
 想生成第一份工作回顾，可以在「本机设置 → 模型连接」添加或导入连接，再到「自动工作回顾」选定默认模型并启用。回到「工作回顾」，对一条会话点击「立即提炼」。
@@ -47,6 +48,7 @@ make ui-install   # 安装前端依赖
 make dev          # 构建前端并启动本机预览
 make test         # 运行前端类型检查与全部 Go 测试
 make package-win  # 交叉编译 Windows 便携版与安装包
+make package-mac  # 在 macOS 构建通用磁盘映像
 ```
 
 [版本记录](CHANGELOG.md) · [安全策略](SECURITY.md) · [提交反馈](https://github.com/xiejun23/Knooo/issues) · [构建与发行](packaging/README.md)

@@ -1,0 +1,53 @@
+name: macOS universal package
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.23.1'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.27.4'
+      - run: make ui-install
+      - run: make test
+      - run: bash packaging/macos/build.sh
+      - name: Test installed app on Apple silicon
+        run: |
+          test "$(uname -m)" = arm64
+          bash packaging/macos/smoke.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: macos-universal
+          path: build/Knooo-macOS-universal.dmg
+          if-no-files-found: error
+
+  smoke-intel:
+    needs: build
+    runs-on: macos-15-intel
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: macos-universal
+          path: build
+      - name: Test the same installed app on Intel
+        run: |
+          test "$(uname -m)" = x86_64
+          bash packaging/macos/smoke.sh

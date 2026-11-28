@@ -34,3 +34,6 @@ jobs:
         run: go test -race -count=1 ./...
       - if: runner.os == 'Windows'
         run: go build -trimpath -o build/Knooo-windows-x64.exe ./cmd/knooo
+
+  macos:
+    uses: ./.github/workflows/macos.yml

@@ -1,4 +1,4 @@
-.PHONY: help dev ui-install ui-build build test vet package-win clean
+.PHONY: help dev ui-install ui-build build test vet package-win package-mac clean
 
 VERSION := $(shell cat VERSION)
 
@@ -30,6 +30,9 @@ package-win: ui-build ## 交叉编译 Windows x64 便携版与 NSIS 安装包
 		-ldflags "-H=windowsgui" -o build/Knooo-windows-x64.exe ./cmd/knooo
 	makensis -WX -DAPP_VERSION="$(VERSION)" packaging/windows.nsi
 	cd build && sha256sum Knooo-windows-x64.exe Knooo-Setup-windows-x64.exe > SHA256SUMS.txt
+
+package-mac: ui-build ## 在 macOS 上构建 Intel 与 Apple 芯片通用 DMG
+	bash packaging/macos/build.sh
 
 clean: ## 清理本地构建产物
 	rm -rf build ui/dist

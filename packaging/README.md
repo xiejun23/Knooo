@@ -1,10 +1,13 @@
-# Knooo Windows x64
+# Knooo 安装包
 
 | GitHub Release 文件 | 用途 |
 | --- | --- |
 | `Knooo-Setup-windows-x64.exe` | 为当前 Windows 用户安装，默认目录为 `%LOCALAPPDATA%\Programs\Knooo`，也可自选目录。添加开始菜单快捷方式和卸载入口。 |
 | `Knooo-windows-x64.exe` | 直接双击运行的便携版。 |
-| `SHA256SUMS.txt` | 两个 EXE 的 SHA-256。Windows PowerShell 可用 `Get-FileHash .\Knooo-windows-x64.exe` 核对。 |
+| `Knooo-macOS-universal.dmg` | macOS 13 及以上，Apple 芯片和 Intel Mac 共用。 |
+| `SHA256SUMS.txt` | 所有发行文件的 SHA-256。Windows PowerShell 可用 `Get-FileHash .\Knooo-windows-x64.exe` 核对。 |
+
+## Windows x64
 
 安装版和便携版使用同一个 EXE，内嵌前端资源、Go 服务和本地数据库引擎。运行需要 Windows x64 和 Microsoft Edge WebView2 Runtime。检测到运行时缺失时，安装包从微软下载并验证签名后安装。便携版用户可从 [Microsoft 下载 WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/#download-section)。
 
@@ -16,7 +19,15 @@
 
 应用按内置配置监听 `127.0.0.1:48763`，端口被占用时自动使用空闲的本机端口。从源码调试时可用 `go run ./cmd/knooo -no-open` 在终端查看地址。Linux 开发预览使用 `xdg-open`，WSL 优先调用 Windows 默认浏览器。
 
-## 本地构建
+## macOS
+
+打开 DMG，将 Knooo 拖入「应用程序」后双击启动。此版本使用临时签名，未经 Apple 公证。如果系统拦截，请先核对下载来源与 SHA-256，再按 Apple 的说明在「系统设置 → 隐私与安全性」确认打开。[Apple 使用指南](https://support.apple.com/guide/mac-help/mh40616/mac)
+
+Knooo 在独立窗口中读取当前用户的 Agent 历史，例如 `~/.codex/sessions` 和 `~/.claude/projects`。如果通过 shell 环境变量指定了自定义目录，可从同一个终端运行 `/Applications/Knooo.app/Contents/MacOS/Knooo`。应用数据位于 `~/Library/Application Support/Knooo`。关闭窗口或按 ⌘Q 退出。更新时退出旧版，再用新 DMG 覆盖「应用程序」里的 Knooo。
+
+在安装了 Xcode Command Line Tools、Go 和 Node 的 Mac 上，从仓库根目录运行 `make ui-install && make package-mac`，然后运行 `bash packaging/macos/smoke.sh` 验证安装、会话读取及退出。用 `shasum -a 256 Knooo-macOS-universal.dmg` 核对正式下载文件。
+
+## Windows 本地构建
 
 在 Ubuntu 24.04 或 WSL 的仓库根目录运行以下命令。CI 使用 Node 22.23.1、Go 1.27.4 和 Ubuntu 的 NSIS `3.09-4ubuntu1`。
 
@@ -35,7 +46,7 @@ makensis -WX -DAPP_VERSION="$version" packaging/windows.nsi
 (cd build && sha256sum Knooo-windows-x64.exe Knooo-Setup-windows-x64.exe > SHA256SUMS.txt)
 ```
 
-`VERSION` 提供应用和 Windows 安装包的版本号。`.github/workflows/release.yml` 在推送与 `VERSION` 匹配的版本标签时构建并发布这三个文件。标签需加 `v` 前缀，例如 `v0.1.3`。`v0.1.3-rc.1` 一类的标签会发布为预发行版本。
+`VERSION` 提供应用和安装包的版本号。`.github/workflows/release.yml` 在推送与 `VERSION` 匹配的版本标签时构建 Windows 和 macOS 安装包，通过各平台验证后发布。标签需加 `v` 前缀，例如 `v0.1.3`。`v0.1.3-rc.1` 一类的标签会发布为预发行版本。
 
 ## 准备版本日志
 
