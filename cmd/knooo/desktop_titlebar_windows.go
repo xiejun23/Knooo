@@ -17,24 +17,17 @@ import (
 const (
 	wmActivate          = 0x0006
 	wmPaint             = 0x000f
-	wmDrawItem          = 0x002b
 	wmNCCalcSize        = 0x0083
 	wmNCHitTest         = 0x0084
 	wmNCMouseMove       = 0x00a0
-	wmCommand           = 0x0111
 	wmSystemCommand     = 0x0112
-	wmMouseMove         = 0x0200
 	wmNCMouseLeave      = 0x02a2
-	wmMouseLeave        = 0x02a3
 	wmDWMComposition    = 0x031e
 	systemCommandPin    = 0x1f00
-	pinButtonID         = 1
 	brandFlightTimer    = 2
 	brandFlightDuration = 1200 * time.Millisecond
 	captionBackground   = 0xfdfaf8 // #f8fafd, the sidebar background
 	captionControlColor = 0x3b2b20
-	pinGlyphUnpinned    = 0xe718 // Segoe Fluent Icons / MDL2 Assets: Pin
-	pinGlyphPinned      = 0xe840 // Segoe Fluent Icons / MDL2 Assets: Pinned
 )
 
 var (
@@ -57,40 +50,30 @@ var (
 	fillRect              = user32.NewProc("FillRect")
 	drawIconEx            = user32.NewProc("DrawIconEx")
 	drawText              = user32.NewProc("DrawTextW")
-	drawFocusRect         = user32.NewProc("DrawFocusRect")
 	invalidateRect        = user32.NewProc("InvalidateRect")
 	getWindowRect         = user32.NewProc("GetWindowRect")
 	screenToClient        = user32.NewProc("ScreenToClient")
 	getDPIForWindow       = user32.NewProc("GetDpiForWindow")
 	getMetricsForDPI      = user32.NewProc("GetSystemMetricsForDpi")
 	isZoomed              = user32.NewProc("IsZoomed")
-	setWindowText         = user32.NewProc("SetWindowTextW")
 	getSystemMenu         = user32.NewProc("GetSystemMenu")
 	checkMenuItem         = user32.NewProc("CheckMenuItem")
 	trackMouseEvent       = user32.NewProc("TrackMouseEvent")
-	setWindowLongPtr      = user32.NewProc("SetWindowLongPtrW")
-	callWindowProc        = user32.NewProc("CallWindowProcW")
 	createSolidBrush      = gdi32.NewProc("CreateSolidBrush")
-	createPen             = gdi32.NewProc("CreatePen")
-	polyline              = gdi32.NewProc("Polyline")
 	createFont            = gdi32.NewProc("CreateFontW")
 	selectObject          = gdi32.NewProc("SelectObject")
 	deleteObject          = gdi32.NewProc("DeleteObject")
 	setBackgroundMode     = gdi32.NewProc("SetBkMode")
 	setTextColor          = gdi32.NewProc("SetTextColor")
 	getTextExtent         = gdi32.NewProc("GetTextExtentPoint32W")
-	getGlyphIndices       = gdi32.NewProc("GetGlyphIndicesW")
 	setDIBitsToDevice     = gdi32.NewProc("SetDIBitsToDevice")
 )
 
 type desktopTitleBar struct {
-	pin, menu    uintptr
-	pinOrigProc  uintptr
-	pinHovered   bool
-	pinFontReady bool
-	pinFont      string
+	enabled      bool
+	menu         uintptr
 	height       int32
-	pinBounds    windows.Rect
+	captionBand  windows.Rect
 	brandBounds  windows.Rect
 	brandHovered bool
 	trackingNC   bool
@@ -131,55 +114,44 @@ type paintStruct struct {
 	reserved  [32]byte
 }
 
-type drawItemStruct struct {
-	controlType uint32
-	controlID   uint32
-	itemID      uint32
-	action      uint32
-	state       uint32
-	item        uintptr
-	dc          uintptr
-	rect        windows.Rect
-	data        uintptr
-}
-
 type brandPose struct {
 	dxDIP    float64
 	dyDIP    float64
 	angleDeg float64
 }
 
-func (w *desktopWindow) initTitleBar(module windows.Handle) {
+func enablePerMonitorDPI() {
+	// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4) keeps the titlebar, eagle icon,
+	// and WebView crisp at native monitor resolution alongside DWM's caption buttons.
+	const perMonitorAwareV2 = ^uintptr(3)
+	if err := setProcessDPIAwareness.Find(); err == nil {
+		if ok, _, _ := setProcessDPIAwareness.Call(perMonitorAwareV2); ok != 0 {
+			return
+		}
+	}
+	if err := setProcessDPIAwareLegacy.Find(); err == nil {
+		setProcessDPIAwareLegacy.Call()
+	}
+}
+
+func (w *desktopWindow) initTitleBar() {
 	const (
-		wsChild         = 0x40000000
-		wsVisible       = 0x10000000
-		bsOwnerDraw     = 0x0000000b
 		swpFrameChanged = 0x0020
 		swpNoActivate   = 0x0010
 		swpNoZOrder     = 0x0004
 		swpNoMoveNoSize = 0x0003
-		gwlpWndProc     = ^uintptr(3) // -4
 	)
-	button, _, err := createWindow.Call(0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("BUTTON"))), uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("窗口置顶"))),
-		wsChild|wsVisible|bsOwnerDraw, 0, 0, 0, 0, w.hwnd, pinButtonID, uintptr(module), 0)
-	if button == 0 {
-		log.Printf("创建 Knooo 标题栏图钉：%v", err)
-		return
-	}
 	hr, _, _ := bufferedPaintInit.Call()
 	if err := webViewResult(hr); err != nil {
-		destroyWindow.Call(button)
 		log.Printf("初始化 Knooo 标题栏：%v", err)
 		return
 	}
 	if err := w.extendTitleBar(); err != nil {
 		bufferedPaintUnInit.Call()
-		destroyWindow.Call(button)
 		log.Printf("扩展 Knooo 标题栏：%v", err)
 		return
 	}
-	w.titleBar.pin = button
-	w.titleBar.pinOrigProc, _, _ = setWindowLongPtr.Call(button, gwlpWndProc, windows.NewCallback(w.pinButtonProc))
+	w.titleBar.enabled = true
 	w.titleBar.eagle = loadTitleEagle()
 	w.titleBar.menu, _, _ = getSystemMenu.Call(w.hwnd, 0)
 	if w.titleBar.menu != 0 {
@@ -188,26 +160,6 @@ func (w *desktopWindow) initTitleBar(module windows.Handle) {
 	}
 	w.url = strings.Replace(w.url, "/#", "/?desktop=1#", 1)
 	setWindowPos.Call(w.hwnd, 0, 0, 0, 0, 0, swpFrameChanged|swpNoActivate|swpNoZOrder|swpNoMoveNoSize)
-}
-
-func (w *desktopWindow) pinButtonProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
-	const tmeLeave = 0x0002
-	switch message {
-	case wmMouseMove:
-		if !w.titleBar.pinHovered {
-			w.titleBar.pinHovered = true
-			tme := trackMouseEventStruct{size: uint32(unsafe.Sizeof(trackMouseEventStruct{})), flags: tmeLeave, hwnd: hwnd}
-			trackMouseEvent.Call(uintptr(unsafe.Pointer(&tme)))
-			invalidateRect.Call(hwnd, 0, 0)
-		}
-	case wmMouseLeave:
-		if w.titleBar.pinHovered {
-			w.titleBar.pinHovered = false
-			invalidateRect.Call(hwnd, 0, 0)
-		}
-	}
-	result, _, _ := callWindowProc.Call(w.titleBar.pinOrigProc, hwnd, uintptr(message), wParam, lParam)
-	return result
 }
 
 func (w *desktopWindow) extendTitleBar() error {
@@ -241,12 +193,11 @@ func (w *desktopWindow) titleClientTop() int32 {
 	return 0
 }
 
-func resolvePinLayout(client windows.Rect, dpi uintptr, caption windows.Rect, hasCaption bool) (windows.Rect, int32) {
+func resolveCaptionBand(client windows.Rect, dpi uintptr, caption windows.Rect, hasCaption bool) (windows.Rect, int32) {
 	defaultWidth := titlePixels(dpi, 46)
 	defaultHeight := titlePixels(dpi, 32)
-	width := defaultWidth
 	top, bottom := int32(0), defaultHeight
-	right := client.Right - 3*width
+	left := max(0, client.Right-3*defaultWidth)
 
 	if hasCaption {
 		bandHeight := caption.Bottom - caption.Top
@@ -261,39 +212,31 @@ func resolvePinLayout(client windows.Rect, dpi uintptr, caption windows.Rect, ha
 		if bandWidth >= minBand && bandWidth <= maxBand {
 			if caption.Right >= client.Right-tolerance && caption.Right <= client.Right+tolerance &&
 				caption.Left >= 0 && caption.Left <= client.Right-minBand {
-				// Align flush with the left edge of Minimize and match each caption button's width.
-				visibleBand := min(caption.Right, client.Right) - caption.Left
-				if visibleBand >= minBand {
-					width = (visibleBand + 1) / 3
-					right = caption.Left
-				}
+				left = caption.Left
 			} else {
-				width = (bandWidth + 1) / 3
-				right = client.Right - 3*width
+				left = max(0, client.Right-bandWidth)
 			}
 		}
 	}
 
-	right = max(0, right)
-	pin := windows.Rect{Left: max(0, right-width), Top: top, Right: right, Bottom: bottom}
+	band := windows.Rect{Left: left, Top: top, Right: client.Right, Bottom: bottom}
 	height := max(bottom, defaultHeight)
-	return pin, height
+	return band, height
 }
 
 func (w *desktopWindow) layoutTitleBar(client windows.Rect) {
-	if w.titleBar.pin == 0 || client.Right == 0 || client.Bottom == 0 {
+	if !w.titleBar.enabled || client.Right == 0 || client.Bottom == 0 {
 		return
 	}
 	dpi := w.titleDPI()
 	caption, ok := w.captionButtons()
-	pin, height := resolvePinLayout(client, dpi, caption, ok)
-	if pin != w.titleBar.pinBounds {
-		w.titleBar.pinBounds = pin
-		setWindowPos.Call(w.titleBar.pin, 0, uintptr(pin.Left), uintptr(pin.Top), uintptr(pin.Right-pin.Left), uintptr(pin.Bottom-pin.Top), 0x0014) // SWP_NOACTIVATE | SWP_NOZORDER
+	band, height := resolveCaptionBand(client, dpi, caption, ok)
+	if band != w.titleBar.captionBand || height != w.titleBar.height {
+		w.titleBar.captionBand = band
+		w.titleBar.height = height
 		area := windows.Rect{Right: client.Right, Bottom: height}
 		invalidateRect.Call(w.hwnd, uintptr(unsafe.Pointer(&area)), 0)
 	}
-	w.titleBar.height = height
 }
 
 func (w *desktopWindow) captionButtons() (windows.Rect, bool) {
@@ -307,7 +250,7 @@ func (w *desktopWindow) captionButtons() (windows.Rect, bool) {
 		return windows.Rect{}, false
 	}
 
-	// DWM reports physical pixels, while the HWND and WebView use logical coordinates.
+	// DWM reports physical pixels, while the HWND and WebView may use logical coordinates.
 	origin := titlePoint{outer.Left, outer.Top}
 	if ok, _, _ := logicalToPhysical.Call(w.hwnd, uintptr(unsafe.Pointer(&origin))); ok == 0 {
 		return windows.Rect{}, false
@@ -342,23 +285,17 @@ func (w *desktopWindow) titleHitTest(hwnd, wParam, lParam uintptr) uintptr {
 	if ok, _, _ := screenToClient.Call(hwnd, uintptr(unsafe.Pointer(&point))); ok == 0 || point.y < 0 || point.y >= w.titleBar.height {
 		return result
 	}
-	pin := w.titleBar.pinBounds
-	if point.y >= pin.Top && point.y < pin.Bottom {
-		if point.x >= pin.Left && point.x < pin.Right {
-			return htClient
-		}
-		if point.x >= pin.Right {
-			if zoomed, _, _ := isZoomed.Call(hwnd); zoomed != 0 {
-				var client windows.Rect
-				getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&client)))
-				left := pin.Right
-				band := client.Right - left
-				if band > 0 && point.x >= left && point.x < client.Right {
-					// DWM paints these controls but can miss their hits with a maximized resize inset.
-					hits := [...]uintptr{8, 9, 20} // HTMINBUTTON, HTMAXBUTTON, HTCLOSE
-					index := min(2, int((point.x-left)*3/band))
-					return hits[index]
-				}
+	band := w.titleBar.captionBand
+	if point.y >= band.Top && point.y < band.Bottom && point.x >= band.Left {
+		if zoomed, _, _ := isZoomed.Call(hwnd); zoomed != 0 {
+			var client windows.Rect
+			getClientRect.Call(hwnd, uintptr(unsafe.Pointer(&client)))
+			span := client.Right - band.Left
+			if span > 0 && point.x < client.Right {
+				// DWM paints these controls but can miss their hits with a maximized resize inset.
+				hits := [...]uintptr{8, 9, 20} // HTMINBUTTON, HTMAXBUTTON, HTCLOSE
+				index := min(2, int((point.x-band.Left)*3/span))
+				return hits[index]
 			}
 		}
 	}
@@ -412,12 +349,12 @@ func (w *desktopWindow) stepBrandFlight() {
 func (w *desktopWindow) invalidateBrandArea() {
 	right := w.titleBar.brandBounds.Right
 	if right <= 0 {
-		right = w.titleBar.pinBounds.Left
+		right = w.titleBar.captionBand.Left
 	}
 	if right <= 0 || w.titleBar.height <= 0 {
 		return
 	}
-	area := windows.Rect{Right: min(right, w.titleBar.pinBounds.Left), Bottom: w.titleBar.height}
+	area := windows.Rect{Right: min(right, w.titleBar.captionBand.Left), Bottom: w.titleBar.height}
 	invalidateRect.Call(w.hwnd, uintptr(unsafe.Pointer(&area)), 0)
 }
 
@@ -475,16 +412,12 @@ func (w *desktopWindow) toggleTitlePin() {
 
 func (w *desktopWindow) setTitlePin(command uintptr) uintptr {
 	state := windowTopmost(w.hwnd, command)
-	if w.titleBar.pin != 0 && state != 0 && command != topmostQuery {
-		label, menuFlags := "窗口置顶", uintptr(0)
+	if w.titleBar.enabled && state != 0 && command != topmostQuery && w.titleBar.menu != 0 {
+		menuFlags := uintptr(0)
 		if state == topmostOn {
-			label, menuFlags = "取消窗口置顶", 0x0008 // MF_CHECKED
+			menuFlags = 0x0008 // MF_CHECKED
 		}
-		setWindowText.Call(w.titleBar.pin, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(label))))
-		invalidateRect.Call(w.titleBar.pin, 0, 0)
-		if w.titleBar.menu != 0 {
-			checkMenuItem.Call(w.titleBar.menu, systemCommandPin, menuFlags)
-		}
+		checkMenuItem.Call(w.titleBar.menu, systemCommandPin, menuFlags)
 	}
 	return state
 }
@@ -496,7 +429,7 @@ func (w *desktopWindow) paintTitleBar() {
 	if dc == 0 || ps.rect.Top >= w.titleBar.height {
 		return
 	}
-	area := windows.Rect{Right: w.titleBar.pinBounds.Right, Bottom: w.titleBar.height}
+	area := windows.Rect{Right: w.titleBar.captionBand.Left, Bottom: w.titleBar.height}
 	system := windows.Rect{Left: area.Right, Right: ps.rect.Right, Bottom: area.Bottom}
 	fillTitleRect(dc, &system, 0)
 	dc, finish := opaqueTitlePaint(dc, &area)
@@ -506,13 +439,13 @@ func (w *desktopWindow) paintTitleBar() {
 	size := titlePixels(dpi, 23)
 	left := titlePixels(dpi, 13)
 	top := (area.Bottom - size) / 2
-	if w.titleBar.pinBounds.Left < titlePixels(dpi, 115) {
+	if w.titleBar.captionBand.Left < titlePixels(dpi, 115) {
 		w.titleBar.brandBounds = windows.Rect{}
 		return
 	}
 	pose := w.brandFlightPose(time.Now())
 	if w.titleBar.eagle != nil {
-		drawTitleEagle(dc, w.titleBar.eagle, left, top, size, w.titleBar.pinBounds.Left, area.Bottom, dpi, pose)
+		drawTitleEagle(dc, w.titleBar.eagle, left, top, size, w.titleBar.captionBand.Left, area.Bottom, dpi, pose)
 	} else {
 		dx := int32(math.Round(pose.dxDIP * float64(dpi) / 96))
 		dy := int32(math.Round(pose.dyDIP * float64(dpi) / 96))
@@ -534,99 +467,9 @@ func (w *desktopWindow) paintTitleBar() {
 	w.titleBar.brandBounds = windows.Rect{
 		Left:   max(0, left-titlePixels(dpi, 4)),
 		Top:    0,
-		Right:  min(w.titleBar.pinBounds.Left, area.Left+titlePixels(dpi, 6)),
+		Right:  min(w.titleBar.captionBand.Left, area.Left+titlePixels(dpi, 6)),
 		Bottom: w.titleBar.height,
 	}
-}
-
-func (w *desktopWindow) paintTitlePin(item *drawItemStruct) {
-	const (
-		odsSelected = 0x0001
-		odsFocus    = 0x0010
-		odsHotLight = 0x0040
-	)
-	pinned := windowTopmost(w.hwnd, topmostQuery) == topmostOn
-	hovered := w.titleBar.pinHovered || item.state&odsHotLight != 0
-	pressed := item.state&odsSelected != 0
-	background, foreground := uintptr(captionBackground), uintptr(captionControlColor)
-	if pinned {
-		background, foreground = 0xfdeee0, 0x9e5c21
-		if pressed {
-			background = 0xf2dcc8
-		} else if hovered {
-			background = 0xf8e5d4
-		}
-	} else if pressed {
-		background = 0xeae5e1
-	} else if hovered {
-		background = 0xf3efec
-	}
-	dc, finish := opaqueTitlePaint(item.dc, &item.rect)
-	defer finish()
-	fillTitleRect(dc, &item.rect, background)
-	w.drawPinGlyph(dc, item.rect, foreground, pinned)
-	if item.state&odsFocus != 0 {
-		focus := item.rect
-		focus.Left, focus.Top = focus.Left+3, focus.Top+3
-		focus.Right, focus.Bottom = focus.Right-3, focus.Bottom-3
-		drawFocusRect.Call(dc, uintptr(unsafe.Pointer(&focus)))
-	}
-}
-
-func (w *desktopWindow) resolvePinFont(dc uintptr, dpi uintptr) string {
-	if w.titleBar.pinFontReady {
-		return w.titleBar.pinFont
-	}
-	w.titleBar.pinFontReady = true
-	const ggiMarkNonExisting = 0x0001
-	glyphs := [2]uint16{pinGlyphUnpinned, pinGlyphPinned}
-	for _, family := range []string{"Segoe Fluent Icons", "Segoe MDL2 Assets"} {
-		restore := titleFont(dc, family, titlePixels(dpi, 10), 400, 4)
-		var indices [2]uint16
-		count, _, _ := getGlyphIndices.Call(dc, uintptr(unsafe.Pointer(&glyphs[0])), 2, uintptr(unsafe.Pointer(&indices[0])), ggiMarkNonExisting)
-		restore()
-		if int32(count) == 2 && indices[0] != 0xffff && indices[1] != 0xffff {
-			w.titleBar.pinFont = family
-			return family
-		}
-	}
-	return ""
-}
-
-func (w *desktopWindow) drawPinGlyph(dc uintptr, rect windows.Rect, color uintptr, pinned bool) {
-	dpi := w.titleDPI()
-	if family := w.resolvePinFont(dc, dpi); family != "" {
-		// Match Windows 10/11 native caption buttons (10 DIPs in Segoe Fluent Icons / MDL2 Assets).
-		restore := titleFont(dc, family, titlePixels(dpi, 10), 400, 4)
-		defer restore()
-		setBackgroundMode.Call(dc, 1) // TRANSPARENT
-		setTextColor.Call(dc, color)
-		codepoint := uint16(pinGlyphUnpinned)
-		if pinned {
-			codepoint = pinGlyphPinned
-		}
-		glyph := [2]uint16{codepoint}
-		drawText.Call(dc, uintptr(unsafe.Pointer(&glyph[0])), 1, uintptr(unsafe.Pointer(&rect)), 0x25) // DT_SINGLELINE | DT_CENTER | DT_VCENTER
-		return
-	}
-	// Fallback compact 10x10 vector pin when system icon fonts are unavailable.
-	x := (rect.Left+rect.Right)/2 - titlePixels(dpi, 4)
-	y := (rect.Top+rect.Bottom)/2 - titlePixels(dpi, 5)
-	pen, _, _ := createPen.Call(0, uintptr(max(1, titlePixels(dpi, 1))), color)
-	if pen == 0 {
-		return
-	}
-	previous, _, _ := selectObject.Call(dc, pen)
-	body := [...]titlePoint{{2, 0}, {6, 0}, {5, 2}, {5, 4}, {7, 6}, {1, 6}, {3, 4}, {3, 2}, {2, 0}}
-	needle := [...]titlePoint{{4, 6}, {4, 10}}
-	for _, points := range [][]titlePoint{body[:], needle[:]} {
-		for i, point := range points {
-			points[i] = titlePoint{x + titlePixels(dpi, point.x), y + titlePixels(dpi, point.y)}
-		}
-		polyline.Call(dc, uintptr(unsafe.Pointer(&points[0])), uintptr(len(points)))
-	}
-	selectObject.Call(dc, previous)
-	deleteObject.Call(pen)
 }
 
 func loadTitleEagle() *image.NRGBA {

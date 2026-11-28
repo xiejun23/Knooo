@@ -25,6 +25,7 @@ const (
 	wmTimer           = 0x0113
 	wmLeftDoubleClick = 0x0203
 	wmRightButtonUp   = 0x0205
+	wmDPIChanged      = 0x02e0
 	wmTray            = 0x8001
 	wmShowDesktop     = 0x8002
 	wmExitDesktop     = 0x8003
@@ -71,8 +72,11 @@ var (
 	setMenuDefault   = user32.NewProc("SetMenuDefaultItem")
 	trackPopupMenu   = user32.NewProc("TrackPopupMenu")
 	destroyMenu      = user32.NewProc("DestroyMenu")
-	systemParameters = user32.NewProc("SystemParametersInfoW")
-	shellNotifyIcon  = shell32.NewProc("Shell_NotifyIconW")
+	systemParameters         = user32.NewProc("SystemParametersInfoW")
+	setProcessDPIAwareness   = user32.NewProc("SetProcessDpiAwarenessContext")
+	setProcessDPIAwareLegacy = user32.NewProc("SetProcessDPIAware")
+	getDPIForSystem          = user32.NewProc("GetDpiForSystem")
+	shellNotifyIcon          = shell32.NewProc("Shell_NotifyIconW")
 )
 
 var setWindowThemeAttribute = windows.NewLazySystemDLL("uxtheme.dll").NewProc("SetWindowThemeAttribute")
@@ -241,6 +245,7 @@ type desktopWindow struct {
 func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	enablePerMonitorDPI()
 	if err := windows.CoInitializeEx(0, windows.COINIT_APARTMENTTHREADED|windows.COINIT_DISABLE_OLE1DDE); err != nil && err != syscall.Errno(windows.S_FALSE) {
 		return fmt.Errorf("初始化 Knooo 桌面窗口：%w", err)
 	}
@@ -277,7 +282,11 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 	}
 	var workArea windows.Rect
 	systemParameters.Call(0x0030, 0, uintptr(unsafe.Pointer(&workArea)), 0)
-	width, height := int32(1240), int32(800)
+	dpi := uintptr(96)
+	if sysDPI, _, _ := getDPIForSystem.Call(); sysDPI >= 96 {
+		dpi = sysDPI
+	}
+	width, height := titlePixels(dpi, 1240), titlePixels(dpi, 800)
 	if workArea.Right > workArea.Left {
 		width = min(width, workArea.Right-workArea.Left)
 		height = min(height, workArea.Bottom-workArea.Top)
@@ -300,8 +309,8 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 	window.tray = trayIconData{id: 1, window: hwnd, flags: 0x7, message: wmTray, icon: icon, version: 4}
 	window.tray.size = uint32(unsafe.Sizeof(window.tray))
 	copy(window.tray.tip[:], windows.StringToUTF16("Knooo"))
-	window.initTitleBar(module)
-	if window.titleBar.pin != 0 {
+	window.initTitleBar()
+	if window.titleBar.enabled {
 		defer bufferedPaintUnInit.Call()
 	}
 	window.addTrayIcon()
@@ -323,7 +332,7 @@ func (h *desktopHost) run(url, data string, stop <-chan struct{}) error {
 }
 
 func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
-	if w.titleBar.pin != 0 {
+	if w.titleBar.enabled {
 		switch message {
 		case wmNCHitTest:
 			return w.titleHitTest(hwnd, wParam, lParam)
@@ -347,16 +356,18 @@ func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uin
 		case wmPaint:
 			w.paintTitleBar()
 			return 0
-		case wmDrawItem:
-			if wParam == pinButtonID {
-				w.paintTitlePin(*(**drawItemStruct)(unsafe.Pointer(&lParam)))
-				return 1
+		case wmDPIChanged:
+			if lParam != 0 {
+				suggested := *(**windows.Rect)(unsafe.Pointer(&lParam))
+				setWindowPos.Call(hwnd, 0, uintptr(suggested.Left), uintptr(suggested.Top),
+					uintptr(suggested.Right-suggested.Left), uintptr(suggested.Bottom-suggested.Top), 0x0014)
 			}
-		case wmCommand:
-			if wParam == pinButtonID && lParam == w.titleBar.pin {
-				w.toggleTitlePin()
-				return 0
+			if err := w.extendTitleBar(); err != nil {
+				log.Printf("扩展 Knooo 标题栏：%v", err)
 			}
+			w.resize()
+			invalidateRect.Call(hwnd, 0, 0)
+			return 0
 		case wmSystemCommand:
 			if wParam == systemCommandPin {
 				w.toggleTitlePin()
@@ -378,7 +389,7 @@ func (w *desktopWindow) message(hwnd uintptr, message uint32, wParam, lParam uin
 	case wmSize:
 		w.resize()
 	case wmMove:
-		if w.titleBar.pin != 0 {
+		if w.titleBar.enabled {
 			w.resize()
 		}
 		if w.controller != nil {
