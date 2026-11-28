@@ -21,7 +21,7 @@ ditto "$mount/Knooo.app" "$app"
 hdiutil detach "$mount"
 codesign --verify --strict --all-architectures "$app"
 exe="$app/Contents/MacOS/Knooo"
-lipo -verify_arch arm64 x86_64 "$exe"
+lipo "$exe" -verify_arch arm64 x86_64
 
 fixture="$tmp/Test User"
 mkdir -p "$fixture/.codex/sessions" "$fixture/.claude/projects/example"

@@ -18,7 +18,7 @@ for arch in arm64 amd64; do
 done
 exe="$app/Contents/MacOS/Knooo"
 lipo -create "$stage/knooo-arm64" "$stage/knooo-amd64" -output "$exe"
-lipo -verify_arch arm64 x86_64 "$exe"
+lipo "$exe" -verify_arch arm64 x86_64
 sed "s/>VERSION</>${version%%[-+]*}</g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
 for size in 16 32 128 256 512; do
