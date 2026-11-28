@@ -7,31 +7,24 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func TestResolvePinLayoutMatchesCaptionSpacing(t *testing.T) {
+func TestResolveCaptionBand(t *testing.T) {
 	client := windows.Rect{Right: 1200, Bottom: 800}
-	// Windows 11 DWM caption band with 2px right margin past client.Right.
 	caption := windows.Rect{Left: 1062, Top: 1, Right: 1202, Bottom: 31}
-	pin, height := resolvePinLayout(client, 96, caption, true)
-	if pin.Right != 1062 {
-		t.Fatalf("pin.Right = %d, want 1062 (flush with Minimize)", pin.Right)
+	band, height := resolveCaptionBand(client, 96, caption, true)
+	if band.Left != 1062 || band.Right != 1200 {
+		t.Fatalf("band horizontal = [%d,%d), want [1062,1200)", band.Left, band.Right)
 	}
-	if gotWidth := pin.Right - pin.Left; gotWidth != 46 {
-		t.Fatalf("pin width = %d, want 46", gotWidth)
-	}
-	if pin.Top != 1 || pin.Bottom != 31 {
-		t.Fatalf("pin vertical = [%d,%d), want [1,31)", pin.Top, pin.Bottom)
+	if band.Top != 1 || band.Bottom != 31 {
+		t.Fatalf("band vertical = [%d,%d), want [1,31)", band.Top, band.Bottom)
 	}
 	if height != 32 {
 		t.Fatalf("height = %d, want 32", height)
 	}
 
 	// Fallback without DWM caption bounds at 150% DPI.
-	pin, height = resolvePinLayout(client, 144, windows.Rect{}, false)
-	if gotWidth := pin.Right - pin.Left; gotWidth != 69 {
-		t.Fatalf("150%% DPI fallback width = %d, want 69", gotWidth)
-	}
-	if pin.Right != client.Right-3*69 {
-		t.Fatalf("150%% DPI fallback right = %d, want %d", pin.Right, client.Right-3*69)
+	band, height = resolveCaptionBand(client, 144, windows.Rect{}, false)
+	if band.Left != client.Right-3*69 {
+		t.Fatalf("150%% DPI fallback left = %d, want %d", band.Left, client.Right-3*69)
 	}
 	if height != 48 {
 		t.Fatalf("150%% DPI fallback height = %d, want 48", height)
@@ -67,7 +60,6 @@ func TestLoadAndRenderTitleEagle(t *testing.T) {
 	if len(buf) != 39*32*4 {
 		t.Fatalf("buffer len = %d, want %d", len(buf), 39*32*4)
 	}
-	// Verify alpha is opaque (255) and at least one pixel differs from background.
 	var changed bool
 	for i := 0; i < len(buf); i += 4 {
 		if buf[i+3] != 255 {
